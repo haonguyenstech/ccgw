@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readConfig, writeConfig, newKey, PID_FILE, LOG_FILE, CONFIG_FILE } from '../src/config.mjs';
+import { interactive, select, prompt } from '../src/menu.mjs';
 import {
   IS_WIN, sleep, findClaude, claudeAuthStatus, copyToClipboard,
   desktop3pDir, desktopSupported, quitDesktop, openDesktop,
@@ -116,9 +117,7 @@ async function start(args = []) {
     }
     if (!readPid()) break;
   }
-  console.error(red('✗ ccgw failed to start. Last log lines:'));
-  console.error(tail(20));
-  process.exit(1);
+  fail(`ccgw failed to start. Last log lines:\n${tail(20)}`);
 }
 
 async function stop({ quiet = false } = {}) {
@@ -176,9 +175,10 @@ function logs(args) {
   }, 500);
 }
 
+// Thrown instead of exiting so the interactive menu can report and carry on.
+class CliError extends Error {}
 function fail(msg) {
-  console.error(red('✗ ' + msg));
-  process.exit(1);
+  throw new CliError(msg);
 }
 
 // ---------------------------------------------------------------- Claude Desktop
@@ -370,6 +370,7 @@ function help() {
   console.log(`
 ${bold('ccgw')} ${dim('v' + VERSION)} — use your Claude Code login as a gateway for Claude Desktop
 
+  ccgw                         interactive menu (arrow keys + enter)
   ccgw start [--port N] [-f]   start in background (-f: foreground)
   ccgw stop                    stop the gateway
   ccgw restart                 stop + start
@@ -394,30 +395,134 @@ ${bold('ccgw')} ${dim('v' + VERSION)} — use your Claude Code login as a gatewa
 `);
 }
 
-const [cmd = 'help', ...args] = process.argv.slice(2);
-switch (cmd) {
-  case 'start': await start(args); break;
-  case 'stop': await stop(); break;
-  case 'restart': await stop({ quiet: true }); await start(args); break;
-  case 'status': await status(); break;
-  case 'info': printInfo(readConfig()); break;
-  case 'copy': {
-    const cfg = readConfig();
-    const isUrl = args[0] === 'url';
-    const v = isUrl ? baseUrl(cfg) : cfg.apiKey;
-    console.log(copyToClipboard(v) ? `copied ${isUrl ? 'base URL' : 'API key'}` : v);
-    break;
+function copyValue(what) {
+  const cfg = readConfig();
+  const isUrl = what === 'url';
+  const v = isUrl ? baseUrl(cfg) : cfg.apiKey;
+  console.log(copyToClipboard(v) ? green(`✓ copied ${isUrl ? 'base URL' : 'API key'}`) : v);
+}
+
+function rotateKey() {
+  const cfg = readConfig();
+  cfg.apiKey = newKey();
+  writeConfig(cfg);
+  console.log('new key generated — run `ccgw restart`, then `ccgw desktop gateway` (or update Claude Desktop by hand)');
+}
+
+async function run(cmd, args) {
+  switch (cmd) {
+    case 'start': return start(args);
+    case 'stop': return stop();
+    case 'restart': await stop({ quiet: true }); return start(args);
+    case 'status': return status();
+    case 'info': return printInfo(readConfig());
+    case 'copy': return copyValue(args[0]);
+    case 'rotate-key': return rotateKey();
+    case 'logs': return logs(args);
+    case 'desktop': return desktop(args);
+    case 'connector': case 'connectors': return connector(args);
+    case '-v': case '--version': case 'version': return console.log(VERSION);
+    case 'menu': return menu();
+    default: return help();
   }
-  case 'rotate-key': {
+}
+
+// ---------------------------------------------------------------- interactive menu
+
+async function menu() {
+  if (!interactive()) return help();
+  console.log(`${bold('ccgw')} ${dim('v' + VERSION)}`);
+  let last = 0;
+  while (true) {
     const cfg = readConfig();
-    cfg.apiKey = newKey();
-    writeConfig(cfg);
-    console.log('new key generated — run `ccgw restart`, then `ccgw desktop gateway` (or update Claude Desktop by hand)');
-    break;
+    const up = !!(await health(cfg, 800));
+    const mode = desktopSupported ? (getMode() === '3p' ? 'gateway' : 'login') : null;
+    const items = [
+      up ? { label: 'Stop gateway', value: 'stop' } : { label: 'Start gateway', value: 'start' },
+      { label: 'Restart gateway', value: 'restart', disabled: !up },
+      { label: 'Show connection info', value: 'info', hint: baseUrl(cfg) },
+      { label: 'Copy API key', value: 'copy-key' },
+      { label: 'Copy base URL', value: 'copy-url' },
+      ...(desktopSupported ? [
+        { label: 'Claude Desktop mode…', value: 'desktop', hint: `now: ${mode}` },
+        { label: 'Connectors…', value: 'connectors', hint: `${connectors().length} added` },
+      ] : []),
+      { label: 'Follow logs', value: 'logs', hint: 'ctrl+c to stop' },
+      { label: 'Rotate API key', value: 'rotate' },
+      { label: 'Quit', value: 'quit' },
+    ];
+    const status = up ? green('● running') : red('○ stopped');
+    const choice = await select(`${status}${mode ? dim(`  ·  Claude Desktop: ${mode} mode`) : ''}`, items, { initial: last });
+    if (choice === null || choice === 'quit') return;
+    last = items.findIndex((it) => it.value === choice);
+    try {
+      switch (choice) {
+        case 'start': await start([]); break;
+        case 'stop': await stop(); break;
+        case 'restart': await stop({ quiet: true }); await start([]); break;
+        case 'info': printInfo(cfg); break;
+        case 'copy-key': copyValue('key'); break;
+        case 'copy-url': copyValue('url'); break;
+        case 'desktop': await desktopMenu(mode); break;
+        case 'connectors': await connectorMenu(); break;
+        case 'logs': return logs(['-f']);
+        case 'rotate': rotateKey(); break;
+      }
+    } catch (e) {
+      if (!(e instanceof CliError)) throw e;
+      console.error(red('✗ ' + e.message));
+    }
+    console.log('');
   }
-  case 'logs': logs(args); break;
-  case 'desktop': await desktop(args); break;
-  case 'connector': case 'connectors': await connector(args); break;
-  case '-v': case '--version': case 'version': console.log(VERSION); break;
-  default: help();
+}
+
+async function desktopMenu(mode) {
+  const choice = await select('Claude Desktop', [
+    { label: 'Use gateway (Claude Code)', value: 'gateway', hint: mode === 'gateway' ? 'current' : '' },
+    { label: 'Use claude.ai login', value: 'login', hint: mode === 'login' ? 'current' : '' },
+    { label: 'Back', value: null },
+  ], { initial: mode === 'gateway' ? 1 : 0 });
+  if (choice) await desktop([choice]);
+}
+
+async function connectorMenu() {
+  const added = connectors();
+  const choice = await select('Connectors', [
+    ...Object.entries(CONNECTOR_PRESETS).map(([id, p]) => ({
+      label: `Add ${p.label}`,
+      value: `add:${id}`,
+      hint: added.some((c) => c.name === id) ? 'added' : '',
+    })),
+    { label: 'Add another MCP server (URL)…', value: 'custom' },
+    { label: 'Remove a connector…', value: 'remove', disabled: !added.length },
+    { label: 'List connectors', value: 'list' },
+    { label: 'Back', value: null },
+  ]);
+  if (!choice) return;
+  if (choice.startsWith('add:')) return connector(['add', choice.slice(4)]);
+  if (choice === 'list') return connector(['list']);
+  if (choice === 'custom') {
+    const url = await prompt('MCP server URL:', { placeholder: '(https://…/mcp)' });
+    if (!url) return;
+    const guess = (() => { try { return new URL(url).hostname.replace(/^(mcp|api)\./, '').split('.')[0]; } catch { return ''; } })();
+    const name = (await prompt('Name:', { placeholder: guess ? `(${guess})` : '' })) || guess;
+    if (!name) return;
+    return connector(['add', name, '--url', url]);
+  }
+  if (choice === 'remove') {
+    const name = await select('Remove which connector?', [
+      ...added.map((c) => ({ label: c.name, value: c.name, hint: c.url || '' })),
+      { label: 'Back', value: null },
+    ]);
+    if (name) await connector(['remove', name]);
+  }
+}
+
+const [cmd, ...args] = process.argv.slice(2);
+try {
+  await run(cmd ?? (interactive() ? 'menu' : 'help'), args);
+} catch (e) {
+  if (!(e instanceof CliError)) throw e;
+  console.error(red('✗ ' + e.message));
+  process.exit(1);
 }

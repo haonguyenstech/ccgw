@@ -66,7 +66,12 @@ export function copyToClipboard(text) {
 
 // Desktop keeps its third-party ("3p") mode in a separate data dir from its
 // claude.ai ("1p") mode. Paths match Desktop's own resolution.
+// CCGW_DESKTOP_DIR points ccgw at a scratch copy (tests) and leaves the real
+// Desktop process alone.
+const FAKE_DESKTOP = !!process.env.CCGW_DESKTOP_DIR;
+
 export function desktop3pDir() {
+  if (FAKE_DESKTOP) return process.env.CCGW_DESKTOP_DIR;
   if (IS_WIN) return path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Claude-3p');
   if (IS_MAC) return path.join(os.homedir(), 'Library', 'Application Support', 'Claude-3p');
   return path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config'), 'Claude-3p');
@@ -79,6 +84,7 @@ export const desktopSupported = IS_MAC || IS_WIN;
 const WIN_DESKTOP_FILTER = `Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.Path -match '\\\\AnthropicClaude\\\\|\\\\WindowsApps\\\\' }`;
 
 function desktopPids() {
+  if (FAKE_DESKTOP) return [];
   try {
     if (IS_MAC) return run('pgrep', ['-x', 'Claude']).split(/\s+/).filter(Boolean);
     if (IS_WIN) return ps(`${WIN_DESKTOP_FILTER} | ForEach-Object { $_.Id }`).split(/\s+/).filter(Boolean);
@@ -119,6 +125,7 @@ function launchDesktop() {
 
 // Succeeds only once a Desktop process that wasn't there before shows up.
 export async function openDesktop() {
+  if (FAKE_DESKTOP) return true;
   const before = new Set(desktopPids());
   if (before.size) { try { launchDesktop(); } catch {} return true; } // just bring it forward
   const started = () => desktopPids().some((p) => !before.has(p));

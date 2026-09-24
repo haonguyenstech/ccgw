@@ -9,7 +9,8 @@ import { fileURLToPath } from 'node:url';
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-smoke-'));
 const port = 18000 + Math.floor(Math.random() * 1000);
-const env = { ...process.env, CCGW_HOME: home, CCGW_SKIP_AUTH_CHECK: '1', CCGW_NO_CLIPBOARD: '1', NO_COLOR: '1' };
+const desktopDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-desktop-'));
+const env = { ...process.env, CCGW_HOME: home, CCGW_DESKTOP_DIR: desktopDir, CCGW_SKIP_AUTH_CHECK: '1', CCGW_NO_CLIPBOARD: '1', NO_COLOR: '1' };
 fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ port, apiKey: 'sk-ccgw-smoke' }));
 
 const ccgw = (...args) => execFileSync(process.execPath, [path.join(root, 'bin/ccgw.mjs'), ...args], { env, encoding: 'utf8', timeout: 60_000 });
@@ -20,6 +21,7 @@ const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  
 
 try {
   check('--version', /^\d+\.\d+\.\d+/.test(ccgw('--version').trim()));
+  check('no args without a TTY prints help', ccgw().includes('ccgw start'));
   const out = ccgw('start');
   check('start prints base URL', out.includes(base), out.split('\n')[0]);
   check('start prints key', out.includes('sk-ccgw-smoke'));
@@ -41,8 +43,8 @@ try {
 
   if (process.platform === 'darwin' || process.platform === 'win32') {
     check('desktop status', ccgw('desktop', 'status').includes('Claude Desktop:'));
-    // Connector commands edit Desktop's real config dir, so only on CI runners.
-    if (process.env.CI) {
+    // CCGW_DESKTOP_DIR keeps these off the real Desktop config and process.
+    {
       check('connector add', ccgw('connector', 'add', 'clickup', '--no-restart').includes('added'));
       check('connector add custom', ccgw('connector', 'add', 'acme', '--url', 'https://mcp.example.com/mcp', '--no-restart').includes('added'));
       ccgw('desktop', 'profile'); // rewriting the gateway profile must keep connectors

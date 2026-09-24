@@ -25,6 +25,10 @@ Uninstall: `ccgw stop; npm uninstall -g ccgw`.
 
 ## Use
 
+Run `ccgw` with no arguments for an interactive menu — **↑/↓** to move,
+**Enter** to run, **Esc** to go back, **q** to quit (number keys jump straight to
+an item). Everything in it is also a plain command:
+
 ```bash
 ccgw start             # start the gateway; prints the values for Claude Desktop
 ccgw desktop gateway   # or: let ccgw write the profile and switch Desktop for you
