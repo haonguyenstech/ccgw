@@ -1,0 +1,31 @@
+name: install
+# Installs the published release with the one-line installers.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  unix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
+      - run: ccgw --version && ccgw help
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - shell: powershell
+        run: |
+          irm https://raw.githubusercontent.com/${{ github.repository }}/main/install.ps1 | iex
+          ccgw --version
+          ccgw help
