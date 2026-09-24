@@ -57,6 +57,7 @@ Paste into Claude Desktop → *Configure third-party inference*:
 | `ccgw connector list` / `remove <name>` | |
 | `ccgw rotate-key` | new API key |
 | `ccgw logs [-f]` | log at `~/.ccgw/gateway.log` |
+| `ccgw update [--check]` | install the latest release (see below) |
 
 Config: `~/.ccgw/config.json` (`port`, `host`, `maxSessions`, `sessionTtlMinutes`,
 `warmPool`, `expose1m`, optional `claudePath`). Listens on `127.0.0.1` only.
@@ -88,6 +89,19 @@ Any other remote MCP server: `ccgw connector add <name> --url https://…/mcp`
 (OAuth by default; `--header "Authorization: Bearer …"` for token-based servers).
 `--no-restart` skips the Desktop restart. Connectors live in the
 "Claude Code (ccgw)" profile, so they work the same on macOS and Windows.
+
+## Updating
+
+```bash
+ccgw update           # install the latest release, restart the gateway if it was running
+ccgw update --check   # only report whether a newer release exists
+```
+
+ccgw checks GitHub for a new release at most once a day and prints a one-line
+notice after a command when there is one (the interactive menu shows an
+**Update** item). It never installs by itself. If Claude Desktop has
+conversations open, `ccgw update` asks before restarting the gateway (`--yes`
+skips the question). Set `CCGW_NO_UPDATE_CHECK=1` to turn the check off.
 
 ## Switching Desktop modes without logging out
 

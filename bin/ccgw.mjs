@@ -3,11 +3,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readConfig, writeConfig, newKey, PID_FILE, LOG_FILE, CONFIG_FILE } from '../src/config.mjs';
 import { interactive, select, prompt } from '../src/menu.mjs';
 import { logo } from '../src/logo.mjs';
+import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/update.mjs';
 import {
   IS_WIN, sleep, findClaude, claudeAuthStatus, copyToClipboard,
   desktop3pDir, desktopSupported, quitDesktop, openDesktop,
@@ -417,6 +418,7 @@ function help() {
   ccgw copy url|key            copy base URL or API key to the clipboard
   ccgw rotate-key              generate a new API key (restart required)
   ccgw logs [-f]               show / follow the log
+  ccgw update [--check]        install the latest release (--check: only report)
 
   ccgw desktop gateway         switch Claude Desktop to gateway mode (starts ccgw if needed)
   ccgw desktop login           switch Claude Desktop to claude.ai login mode
@@ -431,6 +433,52 @@ function help() {
 
   config: ${CONFIG_FILE}
 `);
+}
+
+// ---------------------------------------------------------------- updates
+
+async function update(args) {
+  const latest = await checkForUpdate({ force: true, timeoutMs: 10000 }).catch((e) => fail(e.message));
+  if (!isNewer(latest, VERSION)) {
+    console.log(green(`✓ ccgw v${VERSION} is up to date`));
+    return;
+  }
+  console.log(`${bold(`ccgw v${latest}`)} is available ${dim(`(installed: v${VERSION})`)}`);
+  if (args.includes('--check')) {
+    console.log(dim('  run `ccgw update` to install it'));
+    return;
+  }
+  // A source checkout updates with git, not npm.
+  if (fs.existsSync(path.join(ROOT, '.git'))) fail(`this ccgw runs from a git checkout (${ROOT}) — update it with git pull`);
+
+  const cfg = readConfig();
+  const h = await health(cfg);
+  let restart = !!h;
+  if (h?.sessions && !args.includes('--yes') && !args.includes('-y')) {
+    const ok = interactive()
+      ? !/^n/i.test(await prompt(`${h.sessions} conversation(s) in Claude Desktop will be interrupted by the restart. Restart now?`, { placeholder: '(Y/n)' }))
+      : false;
+    restart = ok;
+  }
+
+  if (installVersion(ROOT, latest) !== 0) fail('npm install failed — re-run the installer from the README');
+  console.log(green(`✓ ccgw updated to v${latest}`));
+  if (!h) return;
+  if (!restart) {
+    console.log(dim('  the running gateway is still the old version — run `ccgw restart` when convenient'));
+    return;
+  }
+  // The files on disk are the new version now, so restart through them.
+  await stop({ quiet: true });
+  spawnSync(process.execPath, [path.join(ROOT, 'bin', 'ccgw.mjs'), 'start'], { stdio: 'inherit' });
+}
+
+// A one-line notice after a command, from a check made at most once a day.
+async function updateNotice(pending) {
+  const latest = await Promise.race([pending, sleep(2000).then(() => null)]).catch(() => null);
+  if (latest && isNewer(latest, VERSION)) {
+    console.error(`\n${cyan(`ccgw v${latest} is available`)} ${dim(`(installed: v${VERSION}) — run: ccgw update`)}`);
+  }
 }
 
 function copyValue(what) {
@@ -459,6 +507,7 @@ async function run(cmd, args) {
     case 'logs': return logs(args);
     case 'desktop': return desktop(args);
     case 'connector': case 'connectors': return connector(args);
+    case 'update': case 'upgrade': return update(args);
     case '-v': case '--version': case 'version': return console.log(VERSION);
     case 'menu': return menu();
     default: return help();
@@ -485,6 +534,7 @@ async function menu() {
         { label: 'Claude Desktop mode…', value: 'desktop', hint: `now: ${mode}` },
         { label: 'Connectors…', value: 'connectors', hint: `${connectors().length} added` },
       ] : []),
+      ...(isNewer(cachedLatest(), VERSION) ? [{ label: `Update to v${cachedLatest()}`, value: 'update', hint: `installed: v${VERSION}` }] : []),
       { label: 'Follow logs', value: 'logs', hint: 'ctrl+c to stop' },
       { label: 'Rotate API key', value: 'rotate' },
       { label: 'Quit', value: 'quit' },
@@ -505,6 +555,7 @@ async function menu() {
         case 'connectors': await connectorMenu(); break;
         case 'logs': return logs(['-f']);
         case 'rotate': rotateKey(); break;
+        case 'update': await update([]); return;
       }
     } catch (e) {
       if (!(e instanceof CliError)) throw e;
@@ -557,8 +608,15 @@ async function connectorMenu() {
 }
 
 const [cmd, ...args] = process.argv.slice(2);
+const command = cmd ?? (interactive() ? 'menu' : 'help');
+// Only people at a terminal see the notice; scripts and pipes stay quiet.
+const noticeFor = process.stderr.isTTY && !['update', 'upgrade', 'logs', '-v', '--version', 'version'].includes(command);
+const pendingUpdate = noticeFor || command === 'menu' ? checkForUpdate() : null;
 try {
-  await run(cmd ?? (interactive() ? 'menu' : 'help'), args);
+  // The menu shows an "Update" item, so give a fresh check a moment to land.
+  if (command === 'menu') await Promise.race([pendingUpdate, sleep(1500)]);
+  await run(command, args);
+  if (noticeFor && command !== 'menu') await updateNotice(pendingUpdate);
 } catch (e) {
   if (!(e instanceof CliError)) throw e;
   console.error(red('✗ ' + e.message));

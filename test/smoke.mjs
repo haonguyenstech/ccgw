@@ -3,17 +3,29 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import http from 'node:http';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const home = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-smoke-'));
 const port = 18000 + Math.floor(Math.random() * 1000);
 const desktopDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-desktop-'));
-const env = { ...process.env, CCGW_HOME: home, CCGW_DESKTOP_DIR: desktopDir, CCGW_SKIP_AUTH_CHECK: '1', CCGW_NO_CLIPBOARD: '1', NO_COLOR: '1' };
+// Stand-in for github.com/…/releases: /latest redirects to the newest tag.
+let releaseHits = 0;
+const releases = http.createServer((req, res) => {
+  if (req.url === '/latest') releaseHits++;
+  res.writeHead(req.url === '/latest' ? 302 : 404, { location: `http://127.0.0.1:${releases.address().port}/tag/v99.0.0` }).end();
+});
+await new Promise((r) => releases.listen(0, '127.0.0.1', r));
+const releasesUrl = `http://127.0.0.1:${releases.address().port}`;
+const env = { ...process.env, CCGW_UPDATE_URL: releasesUrl, CCGW_HOME: home, CCGW_DESKTOP_DIR: desktopDir, CCGW_SKIP_AUTH_CHECK: '1', CCGW_NO_CLIPBOARD: '1', NO_COLOR: '1' };
 fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ port, apiKey: 'sk-ccgw-smoke' }));
 
 const ccgw = (...args) => execFileSync(process.execPath, [path.join(root, 'bin/ccgw.mjs'), ...args], { env, encoding: 'utf8', timeout: 60_000 });
+// Async variant for commands that talk to the in-process release stand-in.
+const ccgwAsync = (...args) => promisify(execFile)(process.execPath, [path.join(root, 'bin/ccgw.mjs'), ...args], { env, encoding: 'utf8', timeout: 60_000 });
 const base = `http://127.0.0.1:${port}`;
 const auth = { authorization: 'Bearer sk-ccgw-smoke' };
 let failed = 0;
@@ -55,6 +67,21 @@ try {
     }
   }
 
+  check('update --check reports newer release', (await ccgwAsync('update', '--check')).stdout.includes('v99.0.0 is available'));
+  let refused = '';
+  try { await ccgwAsync('update'); } catch (e) { refused = String(e.stderr); }
+  check('update refuses a git checkout', refused.includes('git pull'), refused.trim());
+  {
+    process.env.CCGW_HOME = home;
+    process.env.CCGW_UPDATE_URL = releasesUrl;
+    const u = await import('../src/update.mjs');
+    check('isNewer', u.isNewer('0.4.0', '0.3.9') && u.isNewer('v1.0.0', '0.9.9') && !u.isNewer('0.3.3', '0.3.3') && !u.isNewer('0.3.2', '0.3.10') && !u.isNewer(null, '0.1.0'));
+    fs.rmSync(path.join(home, 'update-check.json'), { force: true });
+    const before = releaseHits;
+    const a = await u.checkForUpdate(), b = await u.checkForUpdate();
+    check('auto check hits the network once a day', a === '99.0.0' && b === '99.0.0' && releaseHits - before === 1, `hits=${releaseHits - before}`);
+  }
+
   ccgw('stop');
   let down = false;
   try { await fetch(base + '/health', { signal: AbortSignal.timeout(1000) }); } catch { down = true; }
@@ -66,5 +93,6 @@ try {
   try { ccgw('stop'); } catch {}
 }
 
+releases.close();
 console.log(failed ? `\n${failed} FAILED` : '\nALL PASSED');
 process.exit(failed ? 1 : 0);
