@@ -13,6 +13,8 @@ const bold = (s) => paint(1, s);
 const ascii = process.platform === 'win32' && !process.env.WT_SESSION && process.env.TERM_PROGRAM !== 'vscode';
 const G = ascii ? { pointer: '>', picked: '>', keys: 'up/down move' } : { pointer: '❯', picked: '›', keys: '↑/↓ move' };
 
+let cursorHidden = false;
+
 export const interactive = () => !!(process.stdin.isTTY && process.stdout.isTTY);
 
 // Resolves to the chosen item's value, or null on Esc / q / Ctrl+C.
@@ -48,6 +50,7 @@ export function select(title, items, { initial = 0 } = {}) {
       if (stdin.isTTY) stdin.setRawMode(false);
       stdin.pause();
       stdout.write(`${ESC}${drawn}A${ESC}0J${ESC}?25h`);
+      cursorHidden = false;
       if (value !== null) stdout.write(`${dim(G.picked)} ${items.find((it) => it.value === value).label}\n`);
       resolve(value);
     };
@@ -71,6 +74,7 @@ export function select(title, items, { initial = 0 } = {}) {
     stdin.resume();
     stdin.on('keypress', onKey);
     stdout.write(`${ESC}?25l`);
+    cursorHidden = true;
     render();
   });
 }
@@ -91,4 +95,4 @@ export function prompt(question, { placeholder } = {}) {
 }
 
 // Restore the cursor even if the process is killed mid-menu.
-process.on('exit', () => { if (process.stdout.isTTY) process.stdout.write(`${ESC}?25h`); });
+process.on('exit', () => { if (cursorHidden) process.stdout.write(`${ESC}?25h`); });

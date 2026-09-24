@@ -7,6 +7,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readConfig, writeConfig, newKey, PID_FILE, LOG_FILE, CONFIG_FILE } from '../src/config.mjs';
 import { interactive, select, prompt } from '../src/menu.mjs';
+import { logo } from '../src/logo.mjs';
 import {
   IS_WIN, sleep, findClaude, claudeAuthStatus, copyToClipboard,
   desktop3pDir, desktopSupported, quitDesktop, openDesktop,
@@ -367,9 +368,8 @@ async function desktop(args) {
 }
 
 function help() {
-  console.log(`
-${bold('ccgw')} ${dim('v' + VERSION)} — use your Claude Code login as a gateway for Claude Desktop
-
+  const art = logo(VERSION);
+  console.log(`${art || `\n${bold('ccgw')} ${dim('v' + VERSION)} — use your Claude Code login as a gateway for Claude Desktop\n`}
   ccgw                         interactive menu (arrow keys + enter)
   ccgw start [--port N] [-f]   start in background (-f: foreground)
   ccgw stop                    stop the gateway
@@ -431,7 +431,7 @@ async function run(cmd, args) {
 
 async function menu() {
   if (!interactive()) return help();
-  console.log(`${bold('ccgw')} ${dim('v' + VERSION)}`);
+  console.log(logo(VERSION) || `${bold('ccgw')} ${dim('v' + VERSION)}`);
   let last = 0;
   while (true) {
     const cfg = readConfig();
