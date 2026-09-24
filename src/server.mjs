@@ -409,9 +409,20 @@ class Sink {
     this.res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   }
 
-  addUsage(u) {
+  // Desktop sizes the context (and decides when to compact) from these
+  // numbers, so they must describe one API call, not a sum. message_delta
+  // usage is cumulative for its message, so it overwrites message_start's; when
+  // the CLI loops over its own tools, the input side is the last call's and
+  // only output accumulates.
+  addUsage(u, fresh) {
     if (!u) return;
-    for (const k of Object.keys(this.usage)) if (typeof u[k] === 'number') this.usage[k] += u[k];
+    if (fresh) this.priorOutput = (this.priorOutput || 0) + this.usage.output_tokens;
+    for (const k of Object.keys(this.usage)) if (typeof u[k] === 'number') this.usage[k] = u[k];
+    else if (fresh) this.usage[k] = 0;
+  }
+
+  get totalUsage() {
+    return { ...this.usage, output_tokens: (this.priorOutput || 0) + this.usage.output_tokens };
   }
 
   onEvent(e) {
@@ -420,7 +431,7 @@ class Sink {
       case 'message_start': {
         this.indexMap.clear();
         this.bridged.clear();
-        this.addUsage(e.message.usage);
+        this.addUsage(e.message.usage, true);
         if (!this.started) {
           this.started = true;
           this.msgId = e.message.id;
@@ -506,7 +517,7 @@ class Sink {
     this.done = true;
     clearInterval(this.ping);
     const e = this.stopEvent || { delta: { stop_reason: 'end_turn', stop_sequence: null } };
-    const usage = { ...this.usage };
+    const usage = this.totalUsage;
     this.send('message_delta', { type: 'message_delta', delta: { stop_reason: e.delta.stop_reason, stop_sequence: e.delta.stop_sequence ?? null }, usage });
     this.send('message_stop', { type: 'message_stop' });
     const content = this.content.filter(Boolean).map(({ _json, ...c }) => {
