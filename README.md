@@ -61,7 +61,7 @@ Paste into Claude Desktop → *Configure third-party inference*:
 Config: `~/.ccgw/config.json` (`port`, `host`, `maxSessions`, `sessionTtlMinutes`,
 `warmPool`, `expose1m`, optional `claudePath`). Listens on `127.0.0.1` only.
 
-## Connectors (ClickUp, Linear, Notion, …)
+## Connectors (ClickUp, Linear, Notion, Figma, …)
 
 In gateway mode Claude Desktop has no claude.ai connector directory, so add
 connectors with ccgw. They are remote MCP servers that use OAuth: Desktop
@@ -81,7 +81,9 @@ Then sign in once:
 
 Providers that issue refresh tokens stay signed in; ClickUp does not (its token lasts 24h), so Desktop asks you to **Connect** again about once a day. *Settings → Connectors → clickup → Disconnect* signs out.
 
-Presets: `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`.
+Presets: `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`, `figma`.
+Figma only accepts allowlisted OAuth clients, so for `figma` ccgw registers the
+client itself and writes its id into the profile (callback `127.0.0.1:53282`).
 Any other remote MCP server: `ccgw connector add <name> --url https://…/mcp`
 (OAuth by default; `--header "Authorization: Bearer …"` for token-based servers).
 `--no-restart` skips the Desktop restart. Connectors live in the

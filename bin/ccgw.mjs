@@ -258,7 +258,38 @@ const CONNECTOR_PRESETS = {
   notion: { url: 'https://mcp.notion.com/mcp', label: 'Notion' },
   atlassian: { url: 'https://mcp.atlassian.com/v1/mcp', label: 'Atlassian (Jira, Confluence)' },
   sentry: { url: 'https://mcp.sentry.dev/mcp', label: 'Sentry' },
+  // Figma only lets allowlisted client names register ("Claude Desktop" is not,
+  // "Claude Code" is), so ccgw registers the client and hands Desktop its id.
+  figma: {
+    url: 'https://mcp.figma.com/mcp',
+    label: 'Figma',
+    register: {
+      endpoint: 'https://api.figma.com/v1/oauth/mcp/register', issuer: 'https://api.figma.com',
+      clientName: 'Claude Code', scope: 'mcp:connect', port: 53282,
+    },
+  },
 };
+
+// Registers a client with the provider and returns Desktop's pre-registered oauth block.
+async function registerClient({ endpoint, issuer, clientName, scope, port }) {
+  const r = await fetch(endpoint, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      client_name: clientName,
+      redirect_uris: [`http://127.0.0.1:${port}/callback`],
+      grant_types: ['authorization_code', 'refresh_token'],
+      response_types: ['code'],
+      token_endpoint_auth_method: 'client_secret_post',
+      scope,
+    }),
+    signal: AbortSignal.timeout(15000),
+  }).catch((e) => fail(`client registration failed: ${e.message}`));
+  const body = await r.json().catch(() => null);
+  if (!r.ok || !body?.client_id) fail(`client registration failed (HTTP ${r.status})`);
+  // Desktop drops an entry with a client secret unless it names the issuer.
+  return { clientId: body.client_id, clientSecret: body.client_secret, authorizationServer: [issuer], callbackPort: port, scope };
+}
 
 const connectors = () => readJson(profilePath(), {}).managedMcpServers || [];
 
@@ -300,6 +331,13 @@ async function connector(args) {
       entry.headers = { [k.trim()]: v.join(':').trim() };
     }
     if (!args.includes('--no-oauth') && !header) entry.oauth = true;
+    if (entry.oauth && preset?.register && !flag(args, '--url')) {
+      // Reuse the client from an earlier add so Desktop keeps its sign-in.
+      const prev = list.find((c) => c.name === entry.name && c.url === url)?.oauth;
+      entry.oauth = prev?.clientId
+        ? { ...prev, authorizationServer: [preset.register.issuer] }
+        : await registerClient(preset.register);
+    }
     const next = [...list.filter((c) => c.name !== entry.name), entry];
     const restarted = await applyConnectors(next, args);
     console.log(green(`✓ connector "${entry.name}" added`) + dim(`  (${url})`));
@@ -389,7 +427,7 @@ function help() {
   ccgw connector add clickup   add a connector to Claude Desktop (sign in via browser)
   ccgw connector add <name> --url <https://…/mcp>   any remote MCP server (OAuth)
   ccgw connector list | remove <name>
-  (presets: clickup, linear, notion, atlassian, sentry; --no-restart to skip restart)
+  (presets: clickup, linear, notion, atlassian, sentry, figma; --no-restart to skip restart)
 
   config: ${CONFIG_FILE}
 `);
