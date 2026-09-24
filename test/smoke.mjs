@@ -39,6 +39,10 @@ try {
   const again = ccgw('start');
   check('second start is idempotent', again.includes('already running'));
 
+  if (process.platform === 'darwin' || process.platform === 'win32') {
+    check('desktop status', ccgw('desktop', 'status').includes('Claude Desktop:'));
+  }
+
   ccgw('stop');
   let down = false;
   try { await fetch(base + '/health', { signal: AbortSignal.timeout(1000) }); } catch { down = true; }
