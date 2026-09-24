@@ -215,24 +215,116 @@ function setMode(mode) {
   writeJson(DESKTOP_3P_CONFIG, conf);
 }
 
-function writeProfile() {
-  const cfg = readConfig();
+// Returns the path of our profile file, creating the library entry if needed.
+function profilePath() {
   const meta = readJson(META_FILE, null) || { appliedId: '', entries: [] };
   if (!Array.isArray(meta.entries)) meta.entries = [];
   let entry = meta.entries.find((e) => e.name === PROFILE_NAME);
   if (!entry) {
     entry = { id: crypto.randomUUID(), name: PROFILE_NAME };
     meta.entries.push(entry);
+    writeJson(META_FILE, meta);
   }
-  writeJson(path.join(LIB_DIR, `${entry.id}.json`), {
+  return path.join(LIB_DIR, `${entry.id}.json`);
+}
+
+// Merges the gateway settings into our profile and selects it. Other keys
+// (connectors, anything set in Desktop's settings UI) are kept.
+function writeProfile(extra = {}) {
+  const cfg = readConfig();
+  const file = profilePath();
+  writeJson(file, {
+    ...readJson(file, {}),
     inferenceProvider: 'gateway',
     inferenceCredentialKind: 'static',
     inferenceGatewayBaseUrl: baseUrl(cfg),
     inferenceGatewayApiKey: cfg.apiKey,
     inferenceGatewayAuthScheme: 'bearer',
+    ...extra,
   });
-  meta.appliedId = entry.id;
+  const meta = readJson(META_FILE, { entries: [] });
+  meta.appliedId = meta.entries.find((e) => e.name === PROFILE_NAME).id;
   writeJson(META_FILE, meta);
+}
+
+// ---------------------------------------------------------------- connectors
+
+// Remote MCP servers that authenticate with OAuth dynamic client registration:
+// Desktop registers itself and opens the provider's sign-in page on Connect.
+const CONNECTOR_PRESETS = {
+  clickup: { url: 'https://mcp.clickup.com/mcp', label: 'ClickUp' },
+  linear: { url: 'https://mcp.linear.app/mcp', label: 'Linear' },
+  notion: { url: 'https://mcp.notion.com/mcp', label: 'Notion' },
+  atlassian: { url: 'https://mcp.atlassian.com/v1/mcp', label: 'Atlassian (Jira, Confluence)' },
+  sentry: { url: 'https://mcp.sentry.dev/mcp', label: 'Sentry' },
+};
+
+const connectors = () => readJson(profilePath(), {}).managedMcpServers || [];
+
+function flag(args, name) {
+  const i = args.indexOf(name);
+  return i >= 0 ? args[i + 1] : undefined;
+}
+
+async function applyConnectors(list, args) {
+  const restart = !args.includes('--no-restart');
+  const write = () => writeProfile({ managedMcpServers: list });
+  if (restart) await withDesktopClosed(write);
+  else write();
+  return restart;
+}
+
+async function connector(args) {
+  if (!desktopSupported) fail('Claude Desktop is only available on macOS and Windows.');
+  const [sub = 'list', name] = args;
+  const list = connectors();
+
+  if (sub === 'list') {
+    if (!list.length) console.log(dim('No connectors. Add one with: ccgw connector add clickup'));
+    for (const c of list) console.log(`  ${cyan(c.name.padEnd(12))} ${c.url || c.command || ''} ${dim(c.oauth ? '(OAuth)' : '')}`);
+    console.log(dim(`\n  presets: ${Object.keys(CONNECTOR_PRESETS).join(', ')}`));
+    return;
+  }
+
+  if (sub === 'add') {
+    if (!name) fail('usage: ccgw connector add <preset> | ccgw connector add <name> --url <https://…/mcp> [--header "K: V"] [--no-oauth]');
+    const preset = CONNECTOR_PRESETS[name.toLowerCase()];
+    const url = flag(args, '--url') || preset?.url;
+    if (!url) fail(`unknown preset "${name}". Presets: ${Object.keys(CONNECTOR_PRESETS).join(', ')} — or pass --url`);
+    if (!/^https:\/\//.test(url)) fail('--url must be an https:// MCP endpoint');
+    const entry = { name: name.toLowerCase(), transport: flag(args, '--transport') || 'http', url };
+    const header = flag(args, '--header');
+    if (header) {
+      const [k, ...v] = header.split(':');
+      entry.headers = { [k.trim()]: v.join(':').trim() };
+    }
+    if (!args.includes('--no-oauth') && !header) entry.oauth = true;
+    const next = [...list.filter((c) => c.name !== entry.name), entry];
+    const restarted = await applyConnectors(next, args);
+    console.log(green(`✓ connector "${entry.name}" added`) + dim(`  (${url})`));
+    console.log(entry.oauth ? connectGuide(preset?.label || entry.name, restarted) : dim(restarted ? '  Claude Desktop restarted.' : '  Restart Claude Desktop to load it.'));
+    if (getMode() !== '3p') console.log(dim('  Note: Desktop is in login mode; connectors apply in gateway mode (ccgw desktop gateway).'));
+    return;
+  }
+
+  if (sub === 'remove' || sub === 'rm') {
+    if (!list.some((c) => c.name === name)) fail(`no connector named "${name}"`);
+    await applyConnectors(list.filter((c) => c.name !== name), args);
+    console.log(green(`✓ connector "${name}" removed`));
+    return;
+  }
+  fail(`unknown command: ccgw connector ${sub}`);
+}
+
+function connectGuide(label, restarted) {
+  return `
+  ${bold(`Sign in to ${label}`)} ${dim(restarted ? '(Claude Desktop was restarted)' : '(restart Claude Desktop first)')}
+    1. Claude Desktop → Settings → Connectors
+    2. Click ${cyan(label.split(' ')[0].toLowerCase())} → ${cyan('Connect')}
+    3. Your browser opens ${label}'s sign-in page → log in → ${cyan('Allow')}
+    4. Back in Desktop the connector shows as connected; ask e.g. "list my ${label.split(' ')[0]} tasks"
+  ${dim('Tokens refresh automatically. To disconnect: Settings → Connectors → ' + label.split(' ')[0].toLowerCase() + ' → Disconnect.')}
+`;
 }
 
 // Desktop rewrites its config on quit, so edits happen while it is closed.
@@ -292,6 +384,11 @@ ${bold('ccgw')} ${dim('v' + VERSION)} — use your Claude Code login as a gatewa
   ccgw desktop [status]        show the current mode
   (switching never logs you out: each mode keeps its own session)
 
+  ccgw connector add clickup   add a connector to Claude Desktop (sign in via browser)
+  ccgw connector add <name> --url <https://…/mcp>   any remote MCP server (OAuth)
+  ccgw connector list | remove <name>
+  (presets: clickup, linear, notion, atlassian, sentry; --no-restart to skip restart)
+
   config: ${CONFIG_FILE}
 `);
 }
@@ -319,6 +416,7 @@ switch (cmd) {
   }
   case 'logs': logs(args); break;
   case 'desktop': await desktop(args); break;
+  case 'connector': case 'connectors': await connector(args); break;
   case '-v': case '--version': case 'version': console.log(VERSION); break;
   default: help();
 }

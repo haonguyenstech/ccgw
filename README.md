@@ -49,11 +49,39 @@ Paste into Claude Desktop → *Configure third-party inference*:
 | `ccgw desktop gateway` | switch Desktop to gateway mode (starts ccgw, writes + selects the "Claude Code (ccgw)" profile) |
 | `ccgw desktop login` | switch Desktop back to claude.ai login mode |
 | `ccgw desktop toggle` / `status` | flip modes / show current mode |
+| `ccgw connector add clickup` | add a connector to Desktop (sign in via browser) — see below |
+| `ccgw connector list` / `remove <name>` | |
 | `ccgw rotate-key` | new API key |
 | `ccgw logs [-f]` | log at `~/.ccgw/gateway.log` |
 
 Config: `~/.ccgw/config.json` (`port`, `host`, `maxSessions`, `sessionTtlMinutes`,
 `warmPool`, `expose1m`, optional `claudePath`). Listens on `127.0.0.1` only.
+
+## Connectors (ClickUp, Linear, Notion, …)
+
+In gateway mode Claude Desktop has no claude.ai connector directory, so add
+connectors with ccgw. They are remote MCP servers that use OAuth: Desktop
+registers itself with the provider and opens its sign-in page — no API keys,
+nothing to install.
+
+```bash
+ccgw connector add clickup      # restarts Claude Desktop to load it
+```
+
+Then sign in once:
+
+1. Claude Desktop → **Settings → Connectors**
+2. Click **clickup → Connect**
+3. The browser opens ClickUp's sign-in page → log in → **Allow**
+4. Back in Desktop it shows as connected. Try: *"list my ClickUp tasks"*
+
+Tokens refresh automatically; *Settings → Connectors → clickup → Disconnect* signs out.
+
+Presets: `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`.
+Any other remote MCP server: `ccgw connector add <name> --url https://…/mcp`
+(OAuth by default; `--header "Authorization: Bearer …"` for token-based servers).
+`--no-restart` skips the Desktop restart. Connectors live in the
+"Claude Code (ccgw)" profile, so they work the same on macOS and Windows.
 
 ## Switching Desktop modes without logging out
 

@@ -78,14 +78,18 @@ export const desktopSupported = IS_MAC || IS_WIN;
 // Desktop's install locations (Squirrel under AnthropicClaude, or MSIX).
 const WIN_DESKTOP_FILTER = `Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.Path -match '\\\\AnthropicClaude\\\\|\\\\WindowsApps\\\\' }`;
 
-export function desktopRunning() {
+function desktopPids() {
   try {
-    if (IS_MAC) { run('pgrep', ['-x', 'Claude']); return true; }
-    if (IS_WIN) return Number(ps(`@(${WIN_DESKTOP_FILTER}).Count`)) > 0;
+    if (IS_MAC) return run('pgrep', ['-x', 'Claude']).split(/\s+/).filter(Boolean);
+    if (IS_WIN) return ps(`${WIN_DESKTOP_FILTER} | ForEach-Object { $_.Id }`).split(/\s+/).filter(Boolean);
   } catch {}
-  return false;
+  return [];
 }
 
+export const desktopRunning = () => desktopPids().length > 0;
+
+// Desktop's quit runs cleanup (Cowork VM, MCP servers) that can take a while;
+// wait for it to be fully gone, or a relaunch lands on the dying instance.
 export async function quitDesktop() {
   if (!desktopRunning()) return false;
   try {
@@ -93,7 +97,11 @@ export async function quitDesktop() {
     // Closing the window only hides Desktop to the tray on Windows.
     if (IS_WIN) ps(`${WIN_DESKTOP_FILTER} | Stop-Process -Force`);
   } catch {}
-  for (let i = 0; i < 50 && desktopRunning(); i++) await sleep(200);
+  for (let i = 0; i < 150 && desktopRunning(); i++) await sleep(200);
+  if (desktopRunning()) {
+    try { IS_MAC ? run('pkill', ['-x', 'Claude']) : ps(`${WIN_DESKTOP_FILTER} | Stop-Process -Force`); } catch {}
+    for (let i = 0; i < 25 && desktopRunning(); i++) await sleep(200);
+  }
   return true;
 }
 
@@ -109,13 +117,17 @@ function launchDesktop() {
   }
 }
 
+// Succeeds only once a Desktop process that wasn't there before shows up.
 export async function openDesktop() {
-  // Launching right after a quit can hit the dying instance and do nothing.
+  const before = new Set(desktopPids());
+  if (before.size) { try { launchDesktop(); } catch {} return true; } // just bring it forward
+  const started = () => desktopPids().some((p) => !before.has(p));
   for (let i = 0; i < 10; i++) {
-    await sleep(1000);
     try { launchDesktop(); } catch {}
-    await sleep(500);
-    if (desktopRunning()) return true;
+    for (let j = 0; j < 10; j++) {
+      await sleep(300);
+      if (started()) return true;
+    }
   }
   return false;
 }

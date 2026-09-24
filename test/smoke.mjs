@@ -41,6 +41,16 @@ try {
 
   if (process.platform === 'darwin' || process.platform === 'win32') {
     check('desktop status', ccgw('desktop', 'status').includes('Claude Desktop:'));
+    // Connector commands edit Desktop's real config dir, so only on CI runners.
+    if (process.env.CI) {
+      check('connector add', ccgw('connector', 'add', 'clickup', '--no-restart').includes('added'));
+      check('connector add custom', ccgw('connector', 'add', 'acme', '--url', 'https://mcp.example.com/mcp', '--no-restart').includes('added'));
+      ccgw('desktop', 'profile'); // rewriting the gateway profile must keep connectors
+      const list = ccgw('connector', 'list');
+      check('connectors survive profile rewrite', list.includes('clickup') && list.includes('acme'), list.trim().split('\n')[0]);
+      ccgw('connector', 'remove', 'acme', '--no-restart');
+      check('connector remove', !ccgw('connector', 'list').includes('acme'));
+    }
   }
 
   ccgw('stop');
