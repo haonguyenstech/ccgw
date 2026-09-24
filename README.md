@@ -75,7 +75,7 @@ Then sign in once:
 3. The browser opens ClickUp's sign-in page → log in → **Allow**
 4. Back in Desktop it shows as connected. Try: *"list my ClickUp tasks"*
 
-Tokens refresh automatically; *Settings → Connectors → clickup → Disconnect* signs out.
+Providers that issue refresh tokens stay signed in; ClickUp does not (its token lasts 24h), so Desktop asks you to **Connect** again about once a day. *Settings → Connectors → clickup → Disconnect* signs out.
 
 Presets: `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`.
 Any other remote MCP server: `ccgw connector add <name> --url https://…/mcp`

@@ -323,7 +323,8 @@ function connectGuide(label, restarted) {
     2. Click ${cyan(label.split(' ')[0].toLowerCase())} → ${cyan('Connect')}
     3. Your browser opens ${label}'s sign-in page → log in → ${cyan('Allow')}
     4. Back in Desktop the connector shows as connected; ask e.g. "list my ${label.split(' ')[0]} tasks"
-  ${dim('Tokens refresh automatically. To disconnect: Settings → Connectors → ' + label.split(' ')[0].toLowerCase() + ' → Disconnect.')}
+  ${dim('If the provider issues no refresh token (ClickUp: 24h), Desktop asks you to Connect again when it expires.')}
+  ${dim('To sign out: Settings → Connectors → ' + label.split(' ')[0].toLowerCase() + ' → Disconnect.')}
 `;
 }
 
