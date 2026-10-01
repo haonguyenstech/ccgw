@@ -62,7 +62,7 @@ Paste into Claude Desktop → *Configure third-party inference*:
 Config: `~/.ccgw/config.json` (`port`, `host`, `maxSessions`, `sessionTtlMinutes`,
 `warmPool`, `expose1m`, optional `claudePath`). Listens on `127.0.0.1` only.
 
-## Connectors (ClickUp, Linear, Notion, Figma, …)
+## Connectors (ClickUp, Linear, Notion, Figma, Gmail, …)
 
 In gateway mode Claude Desktop has no claude.ai connector directory, so add
 connectors with ccgw. They are remote MCP servers that use OAuth: Desktop
@@ -82,9 +82,69 @@ Then sign in once:
 
 Providers that issue refresh tokens stay signed in; ClickUp does not (its token lasts 24h), so Desktop asks you to **Connect** again about once a day. *Settings → Connectors → clickup → Disconnect* signs out.
 
-Presets: `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`, `figma`.
+Presets: `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`, `figma`, `figma-local` and `gmail` (both local, see below).
 Figma only accepts allowlisted OAuth clients, so for `figma` ccgw registers the
 client itself and writes its id into the profile (callback `127.0.0.1:53282`).
+
+Gmail runs locally: ccgw ships a small stdio MCP server over the Gmail API
+(search, read messages and threads, send, draft, labels, trash). Google's own
+Gmail MCP server only serves Cloud projects enrolled in its Workspace Developer
+Preview, so ccgw does not use it. Google has no automatic client registration,
+so bring your own OAuth client:
+
+1. [Google Cloud console](https://console.cloud.google.com) → pick or create a project
+2. Enable the Gmail API: `gcloud services enable gmail.googleapis.com`
+   (or APIs & Services → Library → Gmail API)
+3. OAuth consent screen → External → add yourself under **Test users**
+4. Credentials → Create credentials → OAuth client ID → **Desktop app** → download the JSON
+5. `ccgw connector add gmail --client-json ~/Downloads/client_secret_….json`
+   (or `--client-id <id> --client-secret <secret>`)
+
+Step 5 opens Google's sign-in in the browser, stores the refresh token in
+`~/.ccgw/gmail.json` (mode 600) and restarts Desktop — there is no Connect step.
+`ccgw gmail status | login | logout` manages the sign-in. While the consent
+screen is in *Testing*, Google expires the refresh token after 7 days; publish
+the app (it stays unverified, which is fine for your own account) to avoid that.
+
+### Figma without plan limits (`figma-local`)
+
+Figma's remote MCP server allows only a few calls a month on the free Starter
+plan (its REST API is capped the same way). `figma-local` goes through Figma
+Desktop instead: a plugin uses the Plugin API, so nothing is counted. It reads
+files, selections, styles and components, exports images, and can edit designs.
+
+```bash
+ccgw connector add figma-local   # installs the bridge, restarts Claude Desktop
+```
+
+Then, once, in Figma Desktop: open a file → **Plugins → Development → Import
+plugin from manifest…** → `~/.ccgw/figma/plugin/manifest.json`. Run
+**Plugins → Development → ccgw Figma Bridge** in the file Claude should see; it
+connects by itself and reconnects when Desktop restarts. If it is not running,
+Figma tools fail at once and tell Claude to ask you to start it.
+`ccgw figma status` checks the bridge.
+
+It is [Talk to Figma](https://github.com/grab/cursor-talk-to-figma-mcp) (MIT):
+ccgw installs its MCP server into `~/.ccgw/figma`, pins it to one channel so
+there is nothing to join, and runs the WebSocket relay itself on
+`localhost:3055` (no Bun). The plugin copy in `figma-plugin/` has its usage
+analytics removed. With the plugin open in several files, commands go to the
+one where it was started last.
+
+### Permission prompts
+
+Desktop asks *"Claude wants to use …"* before each connector tool. To skip that:
+
+```bash
+ccgw permissions bypass                # every connector, including ones added later
+ccgw permissions bypass figma-local    # just one
+ccgw permissions ask                   # prompt again
+```
+
+(or the **Permission prompts** item in the `ccgw` menu; `connector add … --allow`
+for a single new one). Tools then act without confirmation — including sending
+email or editing designs. It restarts Desktop to apply.
+
 Any other remote MCP server: `ccgw connector add <name> --url https://…/mcp`
 (OAuth by default; `--header "Authorization: Bearer …"` for token-based servers).
 `--no-restart` skips the Desktop restart. Connectors live in the

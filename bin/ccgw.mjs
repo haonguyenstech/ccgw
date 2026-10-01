@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 // ccgw — start/stop a local Anthropic-compatible gateway backed by Claude Code.
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { readConfig, writeConfig, newKey, PID_FILE, LOG_FILE, CONFIG_FILE } from '../src/config.mjs';
-import { interactive, select, prompt } from '../src/menu.mjs';
+import { readConfig, writeConfig, newKey, PID_FILE, LOG_FILE, CONFIG_FILE, HOME_DIR } from '../src/config.mjs';
+import { gmailLogin, gmailLogout, readGmail, serveGmail, GMAIL_FILE } from '../src/gmail.mjs';
+import { installFigma, serveFigma, figmaStatus, PLUGIN_MANIFEST, RELAY_PORT } from '../src/figma.mjs';
+import { interactive, select, prompt, panel, accent } from '../src/menu.mjs';
 import { logo } from '../src/logo.mjs';
 import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/update.mjs';
 import {
@@ -269,7 +272,113 @@ const CONNECTOR_PRESETS = {
       clientName: 'Claude Code', scope: 'mcp:connect', port: 53282,
     },
   },
+  // Google's own Gmail MCP server only serves projects enrolled in its Workspace
+  // Developer Preview, so Gmail runs locally (src/gmail.mjs) over the Gmail API.
+  gmail: { label: 'Gmail', example: 'summarize my unread Gmail from today', local: 'gmail' },
+  // Starter-plan Figma allows only a few remote MCP calls a month; this drives
+  // Figma Desktop through a plugin instead (src/figma.mjs), with no such limit.
+  'figma-local': { label: 'Figma (local, no limits)', example: 'what is selected in Figma?', local: 'figma' },
 };
+
+const GMAIL_HELP = `Gmail needs your own Google OAuth client (Google has no automatic registration):
+    1. console.cloud.google.com → pick or create a project
+    2. Enable the Gmail API: gcloud services enable gmail.googleapis.com
+       (or APIs & Services → Library → Gmail API)
+    3. OAuth consent screen → External → add yourself under Test users
+       (or Publish the app so sign-in does not expire after 7 days)
+    4. Credentials → Create credentials → OAuth client ID → type "Desktop app" → download JSON
+    5. ccgw connector add gmail --client-json ~/Downloads/client_secret_….json
+       or: ccgw connector add gmail --client-id <id> --client-secret <secret>`;
+
+// Reads --client-id/--client-secret or Google's downloaded client JSON.
+function clientCredentials(args) {
+  const file = flag(args, '--client-json');
+  if (file) {
+    const j = readJson(file.replace(/^~(?=[\\/]|$)/, os.homedir()), null);
+    const c = j?.installed || j?.web || j;
+    if (!c?.client_id) fail(`${file}: no client_id found (expected the JSON downloaded from Google Cloud → Credentials)`);
+    return { clientId: c.client_id, clientSecret: c.client_secret };
+  }
+  const clientId = flag(args, '--client-id');
+  return clientId ? { clientId, clientSecret: flag(args, '--client-secret') } : null;
+}
+
+// Signs in when given a client (or when nothing is signed in yet) and returns the account.
+async function ensureGmail(args, { force = false } = {}) {
+  const creds = clientCredentials(args);
+  const saved = readGmail();
+  if (!force && !creds && saved?.refreshToken) return saved.email;
+  const client = creds || (saved?.clientId && saved);
+  if (!client) fail(GMAIL_HELP);
+  try {
+    return await gmailLogin(client);
+  } catch (e) {
+    fail(e.message);
+  }
+}
+
+// A PATH entry for this same node (/opt/homebrew/bin/node) survives upgrades that
+// move the versioned binary (…/Cellar/node/26.8.1/bin/node).
+function stableNode() {
+  const real = (f) => { try { return fs.realpathSync(f); } catch { return null; } };
+  const self = real(process.execPath);
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    const f = path.join(dir, path.basename(process.execPath));
+    if (path.isAbsolute(f) && f !== process.execPath && real(f) === self) return f;
+  }
+  return process.execPath;
+}
+
+// Desktop launches the stdio server itself: node + this script, absolute paths.
+const localEntry = (name, command) => ({
+  name,
+  transport: 'stdio',
+  command: stableNode(),
+  args: [path.join(ROOT, 'bin', 'ccgw.mjs'), command, 'mcp'],
+  ...(process.env.CCGW_HOME && { env: { CCGW_HOME: HOME_DIR } }),
+});
+
+async function gmail(args) {
+  const [sub = 'status'] = args;
+  if (sub === 'mcp') return serveGmail();
+  if (sub === 'login') return console.log(green(`✓ Gmail signed in as ${await ensureGmail(args, { force: true })}`));
+  if (sub === 'logout') { gmailLogout(); return console.log(green('✓ Gmail signed out') + dim(`  (removed ${GMAIL_FILE})`)); }
+  if (sub === 'status') {
+    const g = readGmail();
+    return console.log(g?.refreshToken ? `Gmail: ${cyan(g.email)} ${dim(`(${GMAIL_FILE})`)}` : dim('Gmail: not signed in — ccgw connector add gmail'));
+  }
+  fail(`unknown command: ccgw gmail ${sub}`);
+}
+
+const FIGMA_PLUGIN_HELP = () => `${bold('Load the plugin in Figma Desktop')} ${dim('(once)')}
+    1. Open any design file → menu Plugins → Development → Import plugin from manifest…
+    2. Pick ${cyan(PLUGIN_MANIFEST)}
+    3. Run Plugins → Development → ${cyan('ccgw Figma Bridge')} in the file you want Claude to see
+       (it connects by itself and reconnects when Desktop restarts)`;
+
+function setupFigma() {
+  try {
+    installFigma({ log: (m) => console.log(dim(`  ${m}`)) });
+  } catch (e) {
+    fail(e.message);
+  }
+}
+
+async function figma(args) {
+  const [sub = 'status'] = args;
+  if (sub === 'mcp') return serveFigma();
+  if (sub === 'install' || sub === 'plugin') {
+    setupFigma();
+    return console.log(`${green('✓ Figma bridge installed')}\n\n  ${FIGMA_PLUGIN_HELP()}`);
+  }
+  if (sub === 'status') {
+    const s = await figmaStatus();
+    if (!s.relay) return console.log(dim(`Figma: relay not running on :${RELAY_PORT} — it starts with Claude Desktop once \`ccgw connector add figma-local\` is set`));
+    if (!s.plugin) return console.log(`Figma: relay ${green('up')} on :${RELAY_PORT}, plugin ${red('not connected')} ${dim('— run ccgw Figma Bridge in Figma Desktop')}`);
+    return console.log(`Figma: relay ${green('up')}, plugin ${green('connected')} ${dim(`(page "${s.page}")`)}`);
+  }
+  fail(`unknown command: ccgw figma ${sub}`);
+}
 
 // Registers a client with the provider and returns Desktop's pre-registered oauth block.
 async function registerClient({ endpoint, issuer, clientName, scope, port }) {
@@ -294,12 +403,27 @@ async function registerClient({ endpoint, issuer, clientName, scope, port }) {
 
 const connectors = () => readJson(profilePath(), {}).managedMcpServers || [];
 
+// Re-adding a connector keeps its permission setting; --allow skips prompts for it.
+function keepPolicy(entry, list, args) {
+  const prev = list.find((c) => c.name === entry.name)?.toolPolicy;
+  const toolPolicy = args.includes('--allow') ? ALLOW_ALL : prev;
+  return toolPolicy ? { ...entry, toolPolicy } : entry;
+}
+
 function flag(args, name) {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
 }
 
+// toolPolicy {"*": "allow"} on an entry makes Desktop run its tools without the
+// "Claude wants to use …" prompt. bypassPermissions in our config applies it to
+// every connector, including ones added later.
+const ALLOW_ALL = { '*': 'allow' };
+const bypassAll = () => !!readConfig().bypassPermissions;
+const bypassed = (c) => c.toolPolicy?.['*'] === 'allow';
+
 async function applyConnectors(list, args) {
+  if (bypassAll()) list = list.map((c) => ({ ...c, toolPolicy: ALLOW_ALL }));
   const restart = !args.includes('--no-restart');
   const write = () => writeProfile({ managedMcpServers: list });
   if (restart) await withDesktopClosed(write);
@@ -314,7 +438,7 @@ async function connector(args) {
 
   if (sub === 'list') {
     if (!list.length) console.log(dim('No connectors. Add one with: ccgw connector add clickup'));
-    for (const c of list) console.log(`  ${cyan(c.name.padEnd(12))} ${c.url || c.command || ''} ${dim(c.oauth ? '(OAuth)' : '')}`);
+    for (const c of list) console.log(`  ${cyan(c.name.padEnd(12))} ${c.url || [c.command, ...(c.args || [])].join(' ')} ${dim(c.oauth ? '(OAuth)' : c.transport === 'stdio' ? '(local)' : '')}${bypassed(c) ? ' ' + green('no prompts') : ''}`);
     console.log(dim(`\n  presets: ${Object.keys(CONNECTOR_PRESETS).join(', ')}`));
     return;
   }
@@ -322,6 +446,16 @@ async function connector(args) {
   if (sub === 'add') {
     if (!name) fail('usage: ccgw connector add <preset> | ccgw connector add <name> --url <https://…/mcp> [--header "K: V"] [--no-oauth]');
     const preset = CONNECTOR_PRESETS[name.toLowerCase()];
+    if (preset?.local && !flag(args, '--url')) {
+      const id = name.toLowerCase();
+      const detail = preset.local === 'gmail' ? await ensureGmail(args) : (setupFigma(), 'Figma Desktop plugin');
+      const restarted = await applyConnectors([...list.filter((c) => c.name !== id), keepPolicy(localEntry(id, preset.local), list, args)], args);
+      console.log(green(`✓ connector "${id}" added`) + dim(`  (${detail}, runs locally via ccgw)`));
+      console.log(dim(restarted ? '  Claude Desktop restarted' : '  Restart Claude Desktop to load it') + dim(` — no Connect step needed; ask e.g. "${preset.example}"`));
+      if (preset.local === 'figma') console.log(`\n  ${FIGMA_PLUGIN_HELP()}\n`);
+      if (getMode() !== '3p') console.log(dim('  Note: Desktop is in login mode; connectors apply in gateway mode (ccgw desktop gateway).'));
+      return;
+    }
     const url = flag(args, '--url') || preset?.url;
     if (!url) fail(`unknown preset "${name}". Presets: ${Object.keys(CONNECTOR_PRESETS).join(', ')} — or pass --url`);
     if (!/^https:\/\//.test(url)) fail('--url must be an https:// MCP endpoint');
@@ -339,10 +473,10 @@ async function connector(args) {
         ? { ...prev, authorizationServer: [preset.register.issuer] }
         : await registerClient(preset.register);
     }
-    const next = [...list.filter((c) => c.name !== entry.name), entry];
+    const next = [...list.filter((c) => c.name !== entry.name), keepPolicy(entry, list, args)];
     const restarted = await applyConnectors(next, args);
     console.log(green(`✓ connector "${entry.name}" added`) + dim(`  (${url})`));
-    console.log(entry.oauth ? connectGuide(preset?.label || entry.name, restarted) : dim(restarted ? '  Claude Desktop restarted.' : '  Restart Claude Desktop to load it.'));
+    console.log(entry.oauth ? connectGuide(preset?.label || entry.name, restarted, preset?.example) : dim(restarted ? '  Claude Desktop restarted.' : '  Restart Claude Desktop to load it.'));
     if (getMode() !== '3p') console.log(dim('  Note: Desktop is in login mode; connectors apply in gateway mode (ccgw desktop gateway).'));
     return;
   }
@@ -356,13 +490,48 @@ async function connector(args) {
   fail(`unknown command: ccgw connector ${sub}`);
 }
 
-function connectGuide(label, restarted) {
+async function permissions(args) {
+  if (!desktopSupported) fail('Claude Desktop is only available on macOS and Windows.');
+  const [sub = 'status', name] = args;
+  const list = connectors();
+  if (sub === 'status') {
+    console.log(bypassAll()
+      ? `Permission prompts: ${green('bypassed')} for every connector ${dim('(ccgw permissions ask to turn back on)')}`
+      : `Permission prompts: ${cyan('on')} ${dim('(ccgw permissions bypass to skip them)')}`);
+    for (const c of list) console.log(`  ${c.name.padEnd(12)} ${bypassed(c) ? green('no prompts') : dim('asks before each tool')}`);
+    return;
+  }
+  if (sub !== 'bypass' && sub !== 'ask') fail(`unknown command: ccgw permissions ${sub} (bypass | ask [connector])`);
+  const allow = sub === 'bypass';
+  if (name && !name.startsWith('--')) {
+    if (!list.some((c) => c.name === name)) fail(`no connector named "${name}"`);
+    if (!allow && bypassAll()) fail('prompts are bypassed for every connector — run `ccgw permissions ask` first');
+  } else {
+    const cfg = readConfig();
+    cfg.bypassPermissions = allow;
+    writeConfig(cfg);
+  }
+  const next = list.map((c) => {
+    if (name && !name.startsWith('--') && c.name !== name) return c;
+    const { toolPolicy, ...rest } = c;
+    return allow ? { ...rest, toolPolicy: ALLOW_ALL } : rest;
+  });
+  const restarted = await applyConnectors(next, args);
+  const what = name && !name.startsWith('--') ? `"${name}"` : 'every connector';
+  console.log(allow
+    ? green(`✓ ${what} now runs its tools without asking`) + dim('  (Desktop no longer shows "Claude wants to use …")')
+    : green(`✓ ${what} asks before each tool again`));
+  console.log(dim(restarted ? '  Claude Desktop restarted' : '  Restart Claude Desktop to apply it'));
+  if (allow) console.log(dim('  Note: tools then act without confirmation — including sending email or editing Figma.'));
+}
+
+function connectGuide(label, restarted, example = `list my ${label.split(' ')[0]} tasks`) {
   return `
   ${bold(`Sign in to ${label}`)} ${dim(restarted ? '(Claude Desktop was restarted)' : '(restart Claude Desktop first)')}
     1. Claude Desktop → Settings → Connectors
     2. Click ${cyan(label.split(' ')[0].toLowerCase())} → ${cyan('Connect')}
     3. Your browser opens ${label}'s sign-in page → log in → ${cyan('Allow')}
-    4. Back in Desktop the connector shows as connected; ask e.g. "list my ${label.split(' ')[0]} tasks"
+    4. Back in Desktop the connector shows as connected; ask e.g. "${example}"
   ${dim('If the provider issues no refresh token (ClickUp: 24h), Desktop asks you to Connect again when it expires.')}
   ${dim('To sign out: Settings → Connectors → ' + label.split(' ')[0].toLowerCase() + ' → Disconnect.')}
 `;
@@ -429,7 +598,13 @@ function help() {
   ccgw connector add clickup   add a connector to Claude Desktop (sign in via browser)
   ccgw connector add <name> --url <https://…/mcp>   any remote MCP server (OAuth)
   ccgw connector list | remove <name>
-  (presets: clickup, linear, notion, atlassian, sentry, figma; --no-restart to skip restart)
+  ccgw permissions bypass [name]   skip Desktop's "Claude wants to use …" prompts (all connectors, or one)
+  ccgw permissions ask [name]      prompt again;  ccgw permissions  shows the current setting
+  ccgw connector add gmail --client-json <file>   Gmail via your Google OAuth client (runs locally)
+  ccgw gmail status | login | logout               manage the Gmail sign-in
+  ccgw connector add figma-local   Figma via a Figma Desktop plugin (no plan limits)
+  ccgw figma status | plugin       check the bridge / print the plugin setup steps
+  (presets: clickup, linear, notion, atlassian, sentry, figma, figma-local, gmail; --no-restart to skip restart)
 
   config: ${CONFIG_FILE}
 `);
@@ -507,6 +682,9 @@ async function run(cmd, args) {
     case 'logs': return logs(args);
     case 'desktop': return desktop(args);
     case 'connector': case 'connectors': return connector(args);
+    case 'gmail': return gmail(args);
+    case 'figma': return figma(args);
+    case 'permissions': case 'perms': return permissions(args);
     case 'update': case 'upgrade': return update(args);
     case '-v': case '--version': case 'version': return console.log(VERSION);
     case 'menu': return menu();
@@ -522,25 +700,43 @@ async function menu() {
   let last = 0;
   while (true) {
     const cfg = readConfig();
-    const up = !!(await health(cfg, 800));
+    const h = await health(cfg, 800);
+    const up = !!h;
     const mode = desktopSupported ? (getMode() === '3p' ? 'gateway' : 'login') : null;
-    const items = [
-      up ? { label: 'Stop gateway', value: 'stop' } : { label: 'Start gateway', value: 'start' },
-      { label: 'Restart gateway', value: 'restart', disabled: !up },
-      { label: 'Show connection info', value: 'info', hint: baseUrl(cfg) },
-      { label: 'Copy API key', value: 'copy-key' },
-      { label: 'Copy base URL', value: 'copy-url' },
+    const names = connectors().map((c) => c.name);
+    const latest = cachedLatest();
+    const outdated = isNewer(latest, VERSION);
+    const header = panel([
+      ['Gateway', up
+        ? `${green('● running')}  ${dim(baseUrl(cfg))}${h.sessions ? dim(` · ${h.sessions} chat${h.sessions > 1 ? 's' : ''}`) : ''}`
+        : `${red('○ stopped')}  ${dim('Claude Desktop cannot answer until it starts')}`],
       ...(desktopSupported ? [
-        { label: 'Claude Desktop mode…', value: 'desktop', hint: `now: ${mode}` },
-        { label: 'Connectors…', value: 'connectors', hint: `${connectors().length} added` },
+        ['Desktop', mode === 'gateway' ? `${accent('◆')} gateway mode ${dim('(uses Claude Code)')}` : `◇ login mode ${dim('(claude.ai account)')}`],
+        ['Connectors', names.length ? names.slice(0, 4).join(dim(', ')) + (names.length > 4 ? dim(` +${names.length - 4}`) : '') : dim('none')],
+        ['Permissions', bypassAll() ? `${accent('bypassed')} ${dim('· tools run without asking')}` : `prompts on ${dim('· Desktop asks before each tool')}`],
       ] : []),
-      ...(isNewer(cachedLatest(), VERSION) ? [{ label: `Update to v${cachedLatest()}`, value: 'update', hint: `installed: v${VERSION}` }] : []),
-      { label: 'Follow logs', value: 'logs', hint: 'ctrl+c to stop' },
-      { label: 'Rotate API key', value: 'rotate' },
+      ['Version', `v${VERSION}  ${outdated ? accent(`v${latest} available`) : dim('up to date')}`],
+    ]);
+    const items = [
+      { section: 'Gateway' },
+      up ? { label: 'Stop', value: 'stop' } : { label: 'Start', value: 'start', hint: 'needed for gateway mode' },
+      { label: 'Restart', value: 'restart', disabled: !up },
+      { label: 'Connection info', value: 'info', hint: 'URL + key for Claude Desktop' },
+      ...(desktopSupported ? [
+        { section: 'Claude Desktop' },
+        { label: 'Switch mode…', value: 'desktop', hint: mode === 'gateway' ? 'to claude.ai login' : 'to gateway' },
+        { label: 'Connectors…', value: 'connectors', hint: `${names.length} added` },
+        bypassAll()
+          ? { label: 'Permission prompts: off', value: 'perms-ask', hint: 'turn back on (restarts Desktop)' }
+          : { label: 'Permission prompts: on', value: 'perms-bypass', hint: 'bypass for all connectors (restarts Desktop)' },
+      ] : []),
+      { section: 'ccgw' },
+      outdated
+        ? { label: `Update to v${latest}`, value: 'update', hint: `installed v${VERSION}` }
+        : { label: 'Check for updates', value: 'check' },
       { label: 'Quit', value: 'quit' },
     ];
-    const status = up ? green('● running') : red('○ stopped');
-    const choice = await select(`${status}${mode ? dim(`  ·  Claude Desktop: ${mode} mode`) : ''}`, items, { initial: last });
+    const choice = await select(header, items, { initial: last });
     if (choice === null || choice === 'quit') return;
     last = items.findIndex((it) => it.value === choice);
     try {
@@ -549,13 +745,18 @@ async function menu() {
         case 'stop': await stop(); break;
         case 'restart': await stop({ quiet: true }); await start([]); break;
         case 'info': printInfo(cfg); break;
-        case 'copy-key': copyValue('key'); break;
-        case 'copy-url': copyValue('url'); break;
         case 'desktop': await desktopMenu(mode); break;
         case 'connectors': await connectorMenu(); break;
-        case 'logs': return logs(['-f']);
-        case 'rotate': rotateKey(); break;
+        case 'perms-bypass': await permissions(['bypass']); break;
+        case 'perms-ask': await permissions(['ask']); break;
         case 'update': await update([]); return;
+        case 'check': {
+          const latest = await checkForUpdate({ force: true, timeoutMs: 10000 }).catch((e) => fail(e.message));
+          console.log(isNewer(latest, VERSION)
+            ? `${bold(`ccgw v${latest}`)} is available ${dim(`(installed: v${VERSION}) — pick "Update to v${latest}" below`)}`
+            : green(`✓ ccgw v${VERSION} is up to date`));
+          break;
+        }
       }
     } catch (e) {
       if (!(e instanceof CliError)) throw e;
@@ -576,19 +777,38 @@ async function desktopMenu(mode) {
 
 async function connectorMenu() {
   const added = connectors();
-  const choice = await select('Connectors', [
-    ...Object.entries(CONNECTOR_PRESETS).map(([id, p]) => ({
-      label: `Add ${p.label}`,
-      value: `add:${id}`,
-      hint: added.some((c) => c.name === id) ? 'added' : '',
-    })),
-    { label: 'Add another MCP server (URL)…', value: 'custom' },
+  const preset = ([id, p]) => ({
+    label: p.label,
+    value: `add:${id}`,
+    hint: added.some((c) => c.name === id) ? green('✓ added') : '',
+  });
+  const presets = Object.entries(CONNECTOR_PRESETS);
+  const choice = await select(`${bold('Connectors')}  ${dim(`${added.length} added · pick one to add or re-add it`)}`, [
+    { section: 'Sign in via browser' },
+    ...presets.filter(([, p]) => !p.local).map(preset),
+    { label: 'Other MCP server (URL)…', value: 'custom' },
+    { section: 'Runs on this machine' },
+    ...presets.filter(([, p]) => p.local).map(preset),
+    { section: 'Manage' },
     { label: 'Remove a connector…', value: 'remove', disabled: !added.length },
     { label: 'List connectors', value: 'list' },
     { label: 'Back', value: null },
   ]);
   if (!choice) return;
-  if (choice.startsWith('add:')) return connector(['add', choice.slice(4)]);
+  if (choice.startsWith('add:')) {
+    const id = choice.slice(4);
+    const preset = CONNECTOR_PRESETS[id];
+    if (preset.local === 'gmail' && !readGmail()?.refreshToken) {
+      console.log(dim(`\n  ${GMAIL_HELP}\n`));
+      const file = await prompt('Client JSON file (or leave empty to type the ID):', { placeholder: '(~/Downloads/client_secret_….json)' });
+      if (file) return connector(['add', id, '--client-json', file]);
+      const clientId = await prompt('OAuth client ID:');
+      if (!clientId) return;
+      const clientSecret = await prompt('Client secret:');
+      return connector(['add', id, '--client-id', clientId, ...(clientSecret ? ['--client-secret', clientSecret] : [])]);
+    }
+    return connector(['add', id]);
+  }
   if (choice === 'list') return connector(['list']);
   if (choice === 'custom') {
     const url = await prompt('MCP server URL:', { placeholder: '(https://…/mcp)' });

@@ -59,9 +59,29 @@ try {
     {
       check('connector add', ccgw('connector', 'add', 'clickup', '--no-restart').includes('added'));
       check('connector add custom', ccgw('connector', 'add', 'acme', '--url', 'https://mcp.example.com/mcp', '--no-restart').includes('added'));
+      check('connector add gmail needs a client', (() => { try { ccgw('connector', 'add', 'gmail', '--no-restart'); return false; } catch (e) { return String(e.stderr).includes('OAuth client'); } })());
+      // A saved sign-in skips the browser; the entry then points Desktop at the stdio server.
+      fs.writeFileSync(path.join(home, 'gmail.json'), JSON.stringify({ clientId: 'cid', clientSecret: 'sec', refreshToken: 'rt', email: 'me@example.com' }));
+      check('connector add gmail', ccgw('connector', 'add', 'gmail', '--no-restart').includes('me@example.com'));
+      const profiles = fs.readdirSync(desktopDir, { recursive: true }).filter((f) => String(f).includes('configLibrary') && String(f).endsWith('.json'));
+      const gmail = profiles.map((f) => JSON.parse(fs.readFileSync(path.join(desktopDir, f), 'utf8')).managedMcpServers?.find((c) => c.name === 'gmail')).find(Boolean);
+      check('gmail stdio entry', gmail?.transport === 'stdio' && path.isAbsolute(gmail.command) && gmail.args.at(-1) === 'mcp' && gmail.env?.CCGW_HOME === home, JSON.stringify(gmail));
+      const rpc = execFileSync(gmail.command, gmail.args, {
+        env: { ...env, ...gmail.env }, encoding: 'utf8', timeout: 20_000,
+        input: ['{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}', '{"jsonrpc":"2.0","method":"notifications/initialized"}', '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'].join('\n') + '\n',
+      }).trim().split('\n').map((l) => JSON.parse(l));
+      check('gmail mcp over stdio', rpc.length === 2 && rpc[0].result.serverInfo.name === 'ccgw-gmail' && rpc[1].result.tools.some((t) => t.name === 'send_message'), `${rpc[1]?.result?.tools?.length} tools`);
       ccgw('desktop', 'profile'); // rewriting the gateway profile must keep connectors
       const list = ccgw('connector', 'list');
       check('connectors survive profile rewrite', list.includes('clickup') && list.includes('acme'), list.trim().split('\n')[0]);
+      const policies = () => profiles.map((f) => JSON.parse(fs.readFileSync(path.join(desktopDir, f), 'utf8')).managedMcpServers).find(Boolean).map((c) => c.toolPolicy?.['*']);
+      ccgw('permissions', 'bypass', '--no-restart');
+      check('permissions bypass', policies().every((p) => p === 'allow'), policies().join(','));
+      ccgw('connector', 'add', 'notion', '--no-restart');
+      check('bypass covers new connectors', policies().every((p) => p === 'allow'), policies().join(','));
+      ccgw('permissions', 'ask', '--no-restart');
+      check('permissions ask', policies().every((p) => p === undefined), policies().join(','));
+      ccgw('connector', 'remove', 'notion', '--no-restart');
       ccgw('connector', 'remove', 'acme', '--no-restart');
       check('connector remove', !ccgw('connector', 'list').includes('acme'));
     }

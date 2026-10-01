@@ -37,21 +37,26 @@ const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.met
 // up on the next spawn.
 const CLAUDE_PATH = findClaude(cfg.claudePath);
 
-// Desktop lists a second "1M context window" entry for every model reported
-// with supports_1m, so it's opt-in (config expose1m) to keep the picker clean.
+// Desktop runs its CLI with the picked id and no model catalog, so the CLI sizes
+// its context (and when to compact) from the id alone. With expose1m the 1M-capable
+// models are listed once, as "<id>[1m]"; supports_1m stays false because Desktop
+// would otherwise add a duplicate "1M context window" entry per model.
 const MODELS = [
   { id: 'claude-opus-5-5', display_name: 'Claude Opus 5.5', anthropic_family_tier: 'opus', is_family_default: true, can1m: true },
   { id: 'claude-sonnet-5', display_name: 'Claude Sonnet 5', anthropic_family_tier: 'sonnet', is_family_default: true, can1m: true },
   { id: 'claude-haiku-4-5-20251001', display_name: 'Claude Haiku 4.5', anthropic_family_tier: 'haiku', is_family_default: true },
   { id: 'claude-fable-5-1', display_name: 'Claude Fable 5.1' },
-].map(({ can1m, ...m }) => ({ ...m, supports_1m: !!(can1m && cfg.expose1m), max_input_tokens: can1m && cfg.expose1m ? 1_000_000 : 200_000 }));
+].map(({ can1m, ...m }) => (can1m && cfg.expose1m
+  ? { ...m, id: `${m.id}[1m]`, supports_1m: false, max_input_tokens: 1_000_000 }
+  : { ...m, supports_1m: false, max_input_tokens: 200_000 }));
 
 // The 1M variant arrives as a context-1m beta header or a "[1m]" model suffix;
 // the CLI takes it as the "[1m]" suffix.
 function cliModel(req, headers) {
   const base = String(req.model || '').replace(/\[1m\]$/i, '');
   if (!base) return base;
-  const wants1m = /\[1m\]$/i.test(req.model) || /context-1m/i.test(String(headers['anthropic-beta'] || ''));
+  const wants1m = /\[1m\]$/i.test(req.model) || /context-1m/i.test(String(headers['anthropic-beta'] || ''))
+    || MODELS.some((m) => m.id === `${base}[1m]`); // conversations started before the [1m] ids
   return wants1m && cfg.expose1m ? `${base}[1m]` : base;
 }
 
@@ -670,7 +675,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/v1/models')
       return json(res, 200, { data: MODELS.map((m) => ({ type: 'model', created_at: '2026-01-01T00:00:00Z', ...m })), has_more: false, first_id: MODELS[0].id, last_id: MODELS.at(-1).id });
     if (req.method === 'GET' && p.startsWith('/v1/models/')) {
-      const m = MODELS.find((x) => x.id === p.slice('/v1/models/'.length));
+      const id = decodeURIComponent(p.slice('/v1/models/'.length));
+      const m = MODELS.find((x) => x.id === id || x.id === `${id}[1m]`);
       return m ? json(res, 200, { type: 'model', ...m }) : json(res, 404, errBody('not_found_error', 'model not found'));
     }
     if (req.method === 'POST' && p === '/v1/messages/count_tokens') {
