@@ -20,14 +20,15 @@ Windows (PowerShell):
 irm https://raw.githubusercontent.com/haonguyenstech/ccgw/main/install.ps1 | iex
 ```
 
-Pin a version with `CCGW_VERSION=0.1.0` (sh) or `$env:CCGW_VERSION = "0.1.0"` (PowerShell).
+Pin a version with `CCGW_VERSION=0.3.5` (sh) or `$env:CCGW_VERSION = "0.3.5"` (PowerShell).
 Uninstall: `ccgw stop; npm uninstall -g ccgw`.
 
 ## Use
 
-Run `ccgw` with no arguments for an interactive menu — **↑/↓** to move,
-**Enter** to run, **Esc** to go back, **q** to quit (number keys jump straight to
-an item). Everything in it is also a plain command:
+Run `ccgw` with no arguments for an interactive menu: a status panel (gateway,
+Claude Desktop mode, connectors, permission prompts, version) above numbered
+actions. **↑/↓** move, **Enter** runs, a **number** runs that item, **Esc** goes
+back, **q** quits. Everything in it is also a plain command:
 
 ```bash
 ccgw start             # start the gateway; prints the values for Claude Desktop
@@ -53,24 +54,38 @@ Paste into Claude Desktop → *Configure third-party inference*:
 | `ccgw desktop gateway` | switch Desktop to gateway mode (starts ccgw, writes + selects the "Claude Code (ccgw)" profile) |
 | `ccgw desktop login` | switch Desktop back to claude.ai login mode |
 | `ccgw desktop toggle` / `status` | flip modes / show current mode |
-| `ccgw connector add clickup` | add a connector to Desktop (sign in via browser) — see below |
+| `ccgw connector add <preset>` | add a connector to Desktop — see [Connectors](#connectors-clickup-linear-notion-figma-gmail-) |
 | `ccgw connector list` / `remove <name>` | |
+| `ccgw permissions [bypass\|ask] [name]` | skip or restore Desktop's per-tool permission prompts |
+| `ccgw figma status` / `plugin` | check the `figma-local` bridge / print the plugin setup steps |
+| `ccgw gmail status\|login\|logout` | manage the `gmail` sign-in |
 | `ccgw rotate-key` | new API key |
 | `ccgw logs [-f]` | log at `~/.ccgw/gateway.log` |
 | `ccgw update [--check]` | install the latest release (see below) |
 
 Config: `~/.ccgw/config.json` (`port`, `host`, `maxSessions`, `sessionTtlMinutes`,
-`warmPool`, `expose1m`, optional `claudePath`). Listens on `127.0.0.1` only.
+`warmPool`, `expose1m`, `bypassPermissions`, optional `claudePath`). Listens on `127.0.0.1` only.
 
 ## Connectors (ClickUp, Linear, Notion, Figma, Gmail, …)
 
 In gateway mode Claude Desktop has no claude.ai connector directory, so add
-connectors with ccgw. They are remote MCP servers that use OAuth: Desktop
-registers itself with the provider and opens its sign-in page — no API keys,
-nothing to install.
+connectors with ccgw (or **Connectors…** in the menu). Each one restarts Claude
+Desktop to load it; `--no-restart` skips that. They live in the "Claude Code
+(ccgw)" profile, so they work the same on macOS and Windows.
+
+| Preset | What | Sign-in |
+| --- | --- | --- |
+| `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`, `figma` | the provider's remote MCP server | OAuth in the browser, from Desktop |
+| `gmail` | local MCP server over the Gmail API | your own Google OAuth client, once |
+| `figma-local` | Figma Desktop through a plugin, **no plan limits** | none; run the plugin in Figma |
+
+### Remote connectors (OAuth)
+
+Desktop registers itself with the provider and opens its sign-in page — no API
+keys, nothing to install.
 
 ```bash
-ccgw connector add clickup      # restarts Claude Desktop to load it
+ccgw connector add clickup
 ```
 
 Then sign in once:
@@ -80,11 +95,19 @@ Then sign in once:
 3. The browser opens ClickUp's sign-in page → log in → **Allow**
 4. Back in Desktop it shows as connected. Try: *"list my ClickUp tasks"*
 
-Providers that issue refresh tokens stay signed in; ClickUp does not (its token lasts 24h), so Desktop asks you to **Connect** again about once a day. *Settings → Connectors → clickup → Disconnect* signs out.
+Providers that issue refresh tokens stay signed in; ClickUp does not (its token
+lasts 24h), so Desktop asks you to **Connect** again about once a day.
+*Settings → Connectors → clickup → Disconnect* signs out.
 
-Presets: `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`, `figma`, `figma-local` and `gmail` (both local, see below).
 Figma only accepts allowlisted OAuth clients, so for `figma` ccgw registers the
 client itself and writes its id into the profile (callback `127.0.0.1:53282`).
+On Figma's free Starter plan that server allows only a few calls a month — use
+`figma-local` instead.
+
+Any other remote MCP server: `ccgw connector add <name> --url https://…/mcp`
+(OAuth by default; `--header "Authorization: Bearer …"` for token-based servers).
+
+### Gmail (`gmail`)
 
 Gmail runs locally: ccgw ships a small stdio MCP server over the Gmail API
 (search, read messages and threads, send, draft, labels, trash). Google's own
@@ -109,46 +132,46 @@ the app (it stays unverified, which is fine for your own account) to avoid that.
 ### Figma without plan limits (`figma-local`)
 
 Figma's remote MCP server allows only a few calls a month on the free Starter
-plan (its REST API is capped the same way). `figma-local` goes through Figma
+plan, and its REST API is capped the same way. `figma-local` goes through Figma
 Desktop instead: a plugin uses the Plugin API, so nothing is counted. It reads
 files, selections, styles and components, exports images, and can edit designs.
 
 ```bash
-ccgw connector add figma-local   # installs the bridge, restarts Claude Desktop
+ccgw connector add figma-local   # installs the bridge into ~/.ccgw/figma
 ```
 
 Then, once, in Figma Desktop: open a file → **Plugins → Development → Import
-plugin from manifest…** → `~/.ccgw/figma/plugin/manifest.json`. Run
-**Plugins → Development → ccgw Figma Bridge** in the file Claude should see; it
-connects by itself and reconnects when Desktop restarts. If it is not running,
-Figma tools fail at once and tell Claude to ask you to start it.
-`ccgw figma status` checks the bridge.
+plugin from manifest…** → `~/.ccgw/figma/plugin/manifest.json`.
 
-It is [Talk to Figma](https://github.com/grab/cursor-talk-to-figma-mcp) (MIT):
-ccgw installs its MCP server into `~/.ccgw/figma`, pins it to one channel so
-there is nothing to join, and runs the WebSocket relay itself on
-`localhost:3055` (no Bun). The plugin copy in `figma-plugin/` has its usage
-analytics removed. With the plugin open in several files, commands go to the
-one where it was started last.
+From then on, run **Plugins → Development → ccgw Figma Bridge** in the file
+Claude should see. It connects by itself and reconnects when Desktop restarts.
+If it is not running, Figma tools fail at once and Claude asks you to start it.
+`ccgw figma status` shows whether the relay is up and the plugin connected.
+
+How it works: it is [Talk to Figma](https://github.com/grab/cursor-talk-to-figma-mcp)
+(MIT). ccgw installs its MCP server (pinned to 0.3.5) into `~/.ccgw/figma`, pins
+it to one channel so there is nothing to join, and runs the WebSocket relay
+itself on `localhost:3055` (IPv4 and IPv6 loopback, never the LAN; no Bun). The
+plugin copy in [`figma-plugin/`](figma-plugin/) has its usage analytics removed.
+With the plugin open in several files, commands go to the one where it was
+started last. Figma Desktop must be running; the first `connector add` needs
+npm and network access.
 
 ### Permission prompts
 
 Desktop asks *"Claude wants to use …"* before each connector tool. To skip that:
 
 ```bash
+ccgw permissions                       # show the setting per connector
 ccgw permissions bypass                # every connector, including ones added later
 ccgw permissions bypass figma-local    # just one
 ccgw permissions ask                   # prompt again
 ```
 
-(or the **Permission prompts** item in the `ccgw` menu; `connector add … --allow`
-for a single new one). Tools then act without confirmation — including sending
-email or editing designs. It restarts Desktop to apply.
-
-Any other remote MCP server: `ccgw connector add <name> --url https://…/mcp`
-(OAuth by default; `--header "Authorization: Bearer …"` for token-based servers).
-`--no-restart` skips the Desktop restart. Connectors live in the
-"Claude Code (ccgw)" profile, so they work the same on macOS and Windows.
+Or use **Permission prompts** in the menu, or `connector add <preset> --allow`
+for a single new connector. Re-adding a connector keeps its setting. Tools then
+act without confirmation — including sending email or editing designs. It
+restarts Desktop to apply (`--no-restart` skips that).
 
 ## Updating
 
@@ -158,8 +181,8 @@ ccgw update --check   # only report whether a newer release exists
 ```
 
 ccgw checks GitHub for a new release at most once a day and prints a one-line
-notice after a command when there is one (the interactive menu shows an
-**Update** item). It never installs by itself. If Claude Desktop has
+notice after a command when there is one. In the menu, **Check for updates**
+checks right away and turns into **Update to vX.Y.Z** when one exists. It never installs by itself. If Claude Desktop has
 conversations open, `ccgw update` asks before restarting the gateway (`--yes`
 skips the question). Set `CCGW_NO_UPDATE_CHECK=1` to turn the check off.
 
@@ -201,6 +224,8 @@ Desktop, flips the key and reopens it, so both sessions survive.
   conversation restarts in a fresh CLI process with prior turns flattened to
   text, so images from earlier turns are dropped.
 - The gateway does not start at login; run `ccgw start` after a reboot.
+- `figma-local` is tested on macOS; on Windows it is untested with a real Figma
+  Desktop.
 
 ## Development
 
