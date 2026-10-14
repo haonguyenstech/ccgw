@@ -12,7 +12,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { HOME_DIR } from './config.mjs';
-import { IS_WIN } from './platform.mjs';
+import { IS_WIN, figmaSettingsFile, figmaRunning, quitFigma, openFigma } from './platform.mjs';
 
 const PACKAGE = 'cursor-talk-to-figma-mcp';
 const VERSION = '0.3.5'; // the patch below targets this build
@@ -36,6 +36,48 @@ function copyPlugin() {
   const dir = path.dirname(PLUGIN_MANIFEST);
   fs.mkdirSync(dir, { recursive: true });
   for (const f of fs.readdirSync(PLUGIN_SRC)) fs.copyFileSync(path.join(PLUGIN_SRC, f), path.join(dir, f));
+}
+
+// Figma Desktop keeps "Import plugin from manifest…" in settings.json as three
+// linked entries (manifest, code, ui). Writing them there is the same import.
+const pluginFile = (f) => path.join(path.dirname(PLUGIN_MANIFEST), f);
+
+export function pluginRegistered() {
+  const file = figmaSettingsFile();
+  try {
+    const list = JSON.parse(fs.readFileSync(file, 'utf8')).localFileExtensions || [];
+    return list.some((e) => e.fileMetadata?.type === 'manifest' && path.resolve(e.manifestPath) === path.resolve(PLUGIN_MANIFEST));
+  } catch { return false; }
+}
+
+function writePluginEntries() {
+  const file = figmaSettingsFile();
+  const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
+  const list = settings.localFileExtensions || [];
+  const base = Math.max(0, ...list.map((e) => e.id || 0));
+  const [m, code, ui] = [base + 1, base + 2, base + 3];
+  settings.localFileExtensions = [...list,
+    { id: m, manifestPath: PLUGIN_MANIFEST, lastKnownName: 'ccgw Figma Bridge', lastKnownPluginId: 'ccgw-figma-bridge',
+      fileMetadata: { type: 'manifest', codeFileId: code, uiFileIds: [ui] }, cachedContainsWidget: false },
+    { id: code, manifestPath: pluginFile('code.js'), fileMetadata: { type: 'code', manifestFileId: m } },
+    { id: ui, manifestPath: pluginFile('ui.html'), fileMetadata: { type: 'ui', manifestFileId: m } }];
+  fs.copyFileSync(file, file + '.ccgw.bak');
+  fs.writeFileSync(file, JSON.stringify(settings));
+}
+
+// Adds the plugin to Figma Desktop's Development plugins. Figma rewrites its
+// settings when it quits, so a running Figma is restarted (restart: true) or
+// left alone with a 'running' result.
+export async function registerPlugin({ restart = false } = {}) {
+  const file = figmaSettingsFile();
+  if (!file || !fs.existsSync(file)) return 'no-figma';
+  if (pluginRegistered()) return 'already';
+  const running = figmaRunning();
+  if (running && !restart) return 'running';
+  if (running) await quitFigma();
+  writePluginEntries();
+  if (running) openFigma();
+  return running ? 'restarted' : 'added';
 }
 
 // The server forgets its channel on every (re)connect and refuses to send until
@@ -182,6 +224,7 @@ export async function figmaStatus({ timeoutMs = 4000 } = {}) {
       let data;
       try { data = JSON.parse(e.data); } catch { return; }
       if (data.message?.id === 'ccgw-status' && data.message.result) {
+        if (data.message.error) return done({ relay: true, plugin: false }); // the relay's "no plugin" reply
         const r = data.message.result;
         done({ relay: true, plugin: true, page: r.name, pages: r.pages?.length });
       }

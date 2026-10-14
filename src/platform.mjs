@@ -138,3 +138,50 @@ export async function openDesktop() {
   }
   return false;
 }
+
+// ---------------------------------------------------------------- Figma Desktop
+
+// CCGW_FIGMA_DIR points tests at a fake settings dir and leaves the real app alone.
+const FAKE_FIGMA = !!process.env.CCGW_FIGMA_DIR;
+
+export function figmaSettingsFile() {
+  if (FAKE_FIGMA) return path.join(process.env.CCGW_FIGMA_DIR, 'settings.json');
+  if (IS_MAC) return path.join(os.homedir(), 'Library', 'Application Support', 'Figma', 'settings.json');
+  if (IS_WIN) return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Figma', 'settings.json');
+  return null; // no Figma Desktop on Linux
+}
+
+export function figmaRunning() {
+  if (FAKE_FIGMA) return false;
+  try {
+    if (IS_MAC) return !!run('pgrep', ['-x', 'Figma']).trim();
+    if (IS_WIN) return !!ps('Get-Process Figma -ErrorAction SilentlyContinue | ForEach-Object { $_.Id }');
+  } catch {}
+  return false;
+}
+
+// A normal quit, so open files finish syncing; forced only if it hangs.
+export async function quitFigma() {
+  if (!figmaRunning()) return false;
+  try {
+    if (IS_MAC) run('osascript', ['-e', 'quit app "Figma"']);
+    if (IS_WIN) ps('Get-Process Figma -ErrorAction SilentlyContinue | ForEach-Object { [void]$_.CloseMainWindow() }');
+  } catch {}
+  for (let i = 0; i < 100 && figmaRunning(); i++) await sleep(200);
+  if (figmaRunning()) {
+    try { IS_MAC ? run('pkill', ['-x', 'Figma']) : ps('Stop-Process -Name Figma -Force'); } catch {}
+    for (let i = 0; i < 25 && figmaRunning(); i++) await sleep(200);
+  }
+  return true;
+}
+
+export function openFigma() {
+  if (FAKE_FIGMA) return;
+  try {
+    if (IS_MAC) run('open', ['-a', 'Figma']);
+    if (IS_WIN) {
+      const exe = path.join(process.env.LOCALAPPDATA || '', 'Figma', 'Figma.exe');
+      if (fs.existsSync(exe)) spawn(exe, [], { detached: true, stdio: 'ignore' }).unref();
+    }
+  } catch {}
+}

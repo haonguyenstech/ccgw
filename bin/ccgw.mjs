@@ -8,7 +8,8 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readConfig, writeConfig, newKey, PID_FILE, LOG_FILE, CONFIG_FILE, HOME_DIR } from '../src/config.mjs';
 import { gmailLogin, gmailLogout, readGmail, serveGmail, GMAIL_FILE } from '../src/gmail.mjs';
-import { installFigma, serveFigma, figmaStatus, PLUGIN_MANIFEST, RELAY_PORT } from '../src/figma.mjs';
+import { installFigma, serveFigma, figmaStatus, registerPlugin, pluginRegistered, PLUGIN_MANIFEST, RELAY_PORT } from '../src/figma.mjs';
+import { latestVersion, requirements, refigmaEntry, entryVersion, probe } from '../src/refigma.mjs';
 import { interactive, select, prompt, panel, accent } from '../src/menu.mjs';
 import { logo } from '../src/logo.mjs';
 import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/update.mjs';
@@ -278,6 +279,9 @@ const CONNECTOR_PRESETS = {
   // Starter-plan Figma allows only a few remote MCP calls a month; this drives
   // Figma Desktop through a plugin instead (src/figma.mjs), with no such limit.
   'figma-local': { label: 'Figma (local, no limits)', example: 'what is selected in Figma?', local: 'figma' },
+  // Reads any Figma link through a headless Edge signed in to figma.com (View seat
+  // is enough) and returns HTML / React + Tailwind, SVG, tokens (src/refigma.mjs).
+  refigma: { label: 'Figma links → code (refigma, any seat)', example: 'turn this Figma frame into React: <link>', local: 'refigma' },
 };
 
 const GMAIL_HELP = `Gmail needs your own Google OAuth client (Google has no automatic registration):
@@ -350,31 +354,47 @@ async function gmail(args) {
   fail(`unknown command: ccgw gmail ${sub}`);
 }
 
-const FIGMA_PLUGIN_HELP = () => `${bold('Load the plugin in Figma Desktop')} ${dim('(once)')}
-    1. Open any design file → menu Plugins → Development → Import plugin from manifest…
-    2. Pick ${cyan(PLUGIN_MANIFEST)}
-    3. Run Plugins → Development → ${cyan('ccgw Figma Bridge')} in the file you want Claude to see
-       (it connects by itself and reconnects when Desktop restarts)`;
+const FIGMA_RUN = `Run ${cyan('Plugins → Development → ccgw Figma Bridge')} in the Figma file Claude should see
+    ${dim('(Windows: Figma logo, top left → Plugins → Development; or Ctrl+/ and type "ccgw").')}
+    ${dim('It connects by itself and reconnects when Desktop restarts; keep it open while you work.')}`;
+const FIGMA_IMPORT = `Import it by hand: open a design file → Plugins → Development → Import plugin from manifest…
+    → ${cyan(PLUGIN_MANIFEST)}`;
 
-function setupFigma() {
+// Installs the bridge and puts the plugin into Figma Desktop, restarting Figma
+// when it is open (asked first at a terminal; --restart-figma skips the question).
+async function setupFigma(args = []) {
   try {
     installFigma({ log: (m) => console.log(dim(`  ${m}`)) });
   } catch (e) {
     fail(e.message);
   }
+  let r = await registerPlugin();
+  if (r === 'running') {
+    const yes = args.includes('--restart-figma') || (interactive() &&
+      !/^n/i.test(await prompt('Figma Desktop is open. Restart it to add the ccgw Figma Bridge plugin?', { placeholder: '(Y/n)' }) || ''));
+    if (yes) r = await registerPlugin({ restart: true });
+  }
+  return r;
+}
+
+function figmaNextSteps(r) {
+  const added = { added: 'added to Figma Desktop', restarted: 'added to Figma Desktop (Figma restarted)', already: 'already in Figma Desktop' }[r];
+  if (added) return `${green('✓')} Plugin ${added}\n\n  ${FIGMA_RUN}`;
+  if (r === 'running') return `${bold('Figma Desktop is open')}, so the plugin was not added (Figma rewrites its settings on quit).\n  Quit Figma and run ${cyan('ccgw figma plugin')} — or ${cyan('ccgw figma plugin --restart-figma')}.\n  ${dim(FIGMA_IMPORT)}`;
+  return `${bold('Figma Desktop not found')} ${dim('(install it from figma.com/downloads)')}. Then run ${cyan('ccgw figma plugin')},\n  or ${FIGMA_IMPORT}`;
 }
 
 async function figma(args) {
   const [sub = 'status'] = args;
   if (sub === 'mcp') return serveFigma();
   if (sub === 'install' || sub === 'plugin') {
-    setupFigma();
-    return console.log(`${green('✓ Figma bridge installed')}\n\n  ${FIGMA_PLUGIN_HELP()}`);
+    const r = await setupFigma(args);
+    return console.log(`${green('✓ Figma bridge installed')}\n  ${figmaNextSteps(r)}`);
   }
   if (sub === 'status') {
     const s = await figmaStatus();
     if (!s.relay) return console.log(dim(`Figma: relay not running on :${RELAY_PORT} — it starts with Claude Desktop once \`ccgw connector add figma-local\` is set`));
-    if (!s.plugin) return console.log(`Figma: relay ${green('up')} on :${RELAY_PORT}, plugin ${red('not connected')} ${dim('— run ccgw Figma Bridge in Figma Desktop')}`);
+    if (!s.plugin) return console.log(`Figma: relay ${green('up')} on :${RELAY_PORT}, plugin ${red('not connected')} ${dim(pluginRegistered() ? '— run ccgw Figma Bridge in Figma Desktop' : '— not in Figma yet: ccgw figma plugin')}`);
     return console.log(`Figma: relay ${green('up')}, plugin ${green('connected')} ${dim(`(page "${s.page}")`)}`);
   }
   fail(`unknown command: ccgw figma ${sub}`);
@@ -446,13 +466,15 @@ async function connector(args) {
   if (sub === 'add') {
     if (!name) fail('usage: ccgw connector add <preset> | ccgw connector add <name> --url <https://…/mcp> [--header "K: V"] [--no-oauth]');
     const preset = CONNECTOR_PRESETS[name.toLowerCase()];
+    if (preset?.local === 'refigma' && !flag(args, '--url')) return addRefigma(name.toLowerCase(), preset, list, args);
     if (preset?.local && !flag(args, '--url')) {
       const id = name.toLowerCase();
-      const detail = preset.local === 'gmail' ? await ensureGmail(args) : (setupFigma(), 'Figma Desktop plugin');
+      const figmaResult = preset.local === 'figma' ? await setupFigma(args) : null;
+      const detail = preset.local === 'gmail' ? await ensureGmail(args) : 'Figma Desktop plugin';
       const restarted = await applyConnectors([...list.filter((c) => c.name !== id), keepPolicy(localEntry(id, preset.local), list, args)], args);
       console.log(green(`✓ connector "${id}" added`) + dim(`  (${detail}, runs locally via ccgw)`));
       console.log(dim(restarted ? '  Claude Desktop restarted' : '  Restart Claude Desktop to load it') + dim(` — no Connect step needed; ask e.g. "${preset.example}"`));
-      if (preset.local === 'figma') console.log(`\n  ${FIGMA_PLUGIN_HELP()}\n`);
+      if (figmaResult) console.log(`\n  ${figmaNextSteps(figmaResult)}\n`);
       if (getMode() !== '3p') console.log(dim('  Note: Desktop is in login mode; connectors apply in gateway mode (ccgw desktop gateway).'));
       return;
     }
@@ -488,6 +510,31 @@ async function connector(args) {
     return;
   }
   fail(`unknown command: ccgw connector ${sub}`);
+}
+
+// Adds refigma-mcp: the latest release through npx (re-add to update), --version <x.y.z>
+// to pin one, or --path <checkout> to run a local clone.
+async function addRefigma(id, preset, list, args) {
+  const node = stableNode();
+  const problems = requirements(node);
+  if (problems.length) fail(`refigma-mcp cannot run here:\n    ${problems.join('\n    ')}`);
+  const dirArg = flag(args, '--path');
+  const dir = dirArg && path.resolve(dirArg.replace(/^~(?=[\\/]|$)/, os.homedir()));
+  if (dir && !fs.existsSync(path.join(dir, 'server.mjs'))) fail(`${dir}: no server.mjs (expected a refigma-mcp checkout)`);
+  const version = dir ? null : (flag(args, '--version') || await latestVersion()).replace(/^v/, '');
+  const entry = refigmaEntry(id, { node, version, dir });
+  const before = entryVersion(list.find((c) => c.name === id));
+
+  console.log(dim(`  starting refigma-mcp ${dir ? `from ${dir}` : `v${version}`} once${dir ? '' : ' (npx downloads it the first time)'}…`));
+  const r = await probe(entry);
+  if (!r.ok) fail(`refigma-mcp did not start: ${r.error}`);
+
+  const restarted = await applyConnectors([...list.filter((c) => c.name !== id), keepPolicy(entry, list, args)], args);
+  const what = dir ? dir : before && before !== version ? `v${before} → v${version}` : `v${version}`;
+  console.log(green(`✓ connector "${id}" added`) + dim(`  (refigma-mcp ${what}, runs locally)`));
+  console.log(dim(restarted ? '  Claude Desktop restarted' : '  Restart Claude Desktop to load it') + dim(` — no Connect step needed; ask e.g. "${preset.example}"`));
+  console.log(dim('  It signs in with your Edge figma.com session: the first call asks for the Keychain once — click Allow.'));
+  if (getMode() !== '3p') console.log(dim('  Note: Desktop is in login mode; connectors apply in gateway mode (ccgw desktop gateway).'));
 }
 
 async function permissions(args) {
@@ -603,8 +650,9 @@ function help() {
   ccgw connector add gmail --client-json <file>   Gmail via your Google OAuth client (runs locally)
   ccgw gmail status | login | logout               manage the Gmail sign-in
   ccgw connector add figma-local   Figma via a Figma Desktop plugin (no plan limits)
-  ccgw figma status | plugin       check the bridge / print the plugin setup steps
-  (presets: clickup, linear, notion, atlassian, sentry, figma, figma-local, gmail; --no-restart to skip restart)
+  ccgw figma status | plugin       check the bridge / add the plugin to Figma Desktop (--restart-figma)
+  ccgw connector add refigma [--version x.y.z | --path <dir>]   Figma links → code via refigma-mcp (macOS)
+  (presets: clickup, linear, notion, atlassian, sentry, figma, figma-local, gmail, refigma; --no-restart to skip restart)
 
   config: ${CONFIG_FILE}
 `);

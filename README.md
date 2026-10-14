@@ -57,7 +57,7 @@ Paste into Claude Desktop → *Configure third-party inference*:
 | `ccgw connector add <preset>` | add a connector to Desktop — see [Connectors](#connectors-clickup-linear-notion-figma-gmail-) |
 | `ccgw connector list` / `remove <name>` | |
 | `ccgw permissions [bypass\|ask] [name]` | skip or restore Desktop's per-tool permission prompts |
-| `ccgw figma status` / `plugin` | check the `figma-local` bridge / print the plugin setup steps |
+| `ccgw figma status` / `plugin [--restart-figma]` | check the `figma-local` bridge / add the plugin to Figma Desktop |
 | `ccgw gmail status\|login\|logout` | manage the `gmail` sign-in |
 | `ccgw rotate-key` | new API key |
 | `ccgw logs [-f]` | log at `~/.ccgw/gateway.log` |
@@ -78,6 +78,7 @@ Desktop to load it; `--no-restart` skips that. They live in the "Claude Code
 | `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`, `figma` | the provider's remote MCP server | OAuth in the browser, from Desktop |
 | `gmail` | local MCP server over the Gmail API | your own Google OAuth client, once |
 | `figma-local` | Figma Desktop through a plugin, **no plan limits** | none; run the plugin in Figma |
+| `refigma` | Figma links → HTML / React + Tailwind, SVG, tokens via [refigma-mcp](https://github.com/haonguyenstech/refigma-mcp); a **View seat** is enough (macOS) | your figma.com session in Microsoft Edge |
 
 ### Remote connectors (OAuth)
 
@@ -140,8 +141,11 @@ files, selections, styles and components, exports images, and can edit designs.
 ccgw connector add figma-local   # installs the bridge into ~/.ccgw/figma
 ```
 
-Then, once, in Figma Desktop: open a file → **Plugins → Development → Import
-plugin from manifest…** → `~/.ccgw/figma/plugin/manifest.json`.
+This also adds the plugin to Figma Desktop's development plugins. Figma rewrites
+its settings when it quits, so if it is open ccgw asks to restart it
+(`--restart-figma` skips the question). Otherwise, quit Figma and run
+`ccgw figma plugin`, or import it by hand: open a file → **Plugins → Development →
+Import plugin from manifest…** → `~/.ccgw/figma/plugin/manifest.json`.
 
 From then on, run **Plugins → Development → ccgw Figma Bridge** in the file
 Claude should see. It connects by itself and reconnects when Desktop restarts.
@@ -156,6 +160,29 @@ plugin copy in [`figma-plugin/`](figma-plugin/) has its usage analytics removed.
 With the plugin open in several files, commands go to the one where it was
 started last. Figma Desktop must be running; the first `connector add` needs
 npm and network access.
+
+### Figma links to code, any seat (`refigma`)
+
+`figma-local` needs a seat that can run plugins. [refigma-mcp](https://github.com/haonguyenstech/refigma-mcp)
+reads a Figma link through a headless Microsoft Edge signed in to figma.com, so
+a View seat works and nothing counts against an API quota. It returns the layout
+tree, HTML / React + Tailwind, SVG icons, design tokens and Figma's own PNG, and
+can pixel-diff your implementation against that PNG. It only reads; it does not
+edit designs.
+
+```bash
+ccgw connector add refigma                    # latest release, via npx
+ccgw connector add refigma --version 0.4.0    # pin a release
+ccgw connector add refigma --path ~/refigma-mcp   # run a local checkout
+```
+
+Needs macOS, Microsoft Edge signed in to figma.com, Node ≥ 22.15 and Python 3
+with `cryptography`; ccgw checks these and starts the server once before writing
+the entry, so npx's first download does not happen inside Desktop's startup. The
+entry stays on the version it was added with; run the same command again to move
+to the latest release. The first Figma call asks for the Keychain (to read Edge's
+cookies) — click **Allow**. Then paste a link (right-click a frame → *Copy link
+to selection*) and ask, e.g. *"turn this frame into React"*.
 
 ### Permission prompts
 
