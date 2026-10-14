@@ -12,6 +12,7 @@ import { installFigma, serveFigma, figmaStatus, registerPlugin, pluginRegistered
 import { latestVersion, requirements, supportsPlatform, refigmaEntry, entryVersion, probe, findPython, installPython } from '../src/refigma.mjs';
 import { interactive, select, prompt, panel, accent } from '../src/menu.mjs';
 import { logo } from '../src/logo.mjs';
+import { provider, claudeToken, timeLeft, statusLine, loginRunning, openLogin } from '../src/credential.mjs';
 import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/update.mjs';
 import {
   IS_WIN, sleep, findClaude, claudeAuthStatus, copyToClipboard,
@@ -95,7 +96,10 @@ async function start(args = []) {
   if (!process.env.CCGW_SKIP_AUTH_CHECK) {
     if (!claudePath) fail('Claude Code CLI not found. Install it (https://claude.com/claude-code), run `claude` and log in, then retry.');
     auth = claudeAuthStatus(claudePath);
-    if (!auth?.loggedIn) fail('Claude Code CLI is not logged in. Run `claude` and /login first.');
+    const cred = provider(cfg);
+    if (!auth?.loggedIn) fail(cred
+      ? `Claude Code CLI is not logged in. Sign in with ${cred.name}: ccgw credential login`
+      : 'Claude Code CLI is not logged in. Run `claude` and /login first.');
   }
 
   if (args.includes('--foreground') || args.includes('-f')) {
@@ -157,6 +161,95 @@ async function status() {
   } else {
     console.log(red('○ stopped') + dim('  — run `ccgw start`'));
   }
+  if (provider(cfg)) credential(['status']);
+}
+
+// ---------------------------------------------------------------- credential provider
+
+// "3h 12m left" in green, under an hour in the accent color, red once expired.
+function loginLeft() {
+  const t = claudeToken();
+  if (!t) return red('no Claude Code login');
+  const left = timeLeft(t.expiresAt);
+  if (left === 'expired') return red('login expired');
+  return t.expiresAt - Date.now() < 3_600_000 ? accent(`${left} left`) : green(`${left} left`);
+}
+
+// Runs the provider's login in this terminal and comes back when it exits. Ctrl+C
+// goes to the login (it shares the terminal), not to ccgw, so the menu carries on.
+async function runLoginHere(p) {
+  console.log(dim(`  running ${p.login} — it keeps the login current while it runs; quit it to return\n`));
+  const ignore = () => {};
+  process.on('SIGINT', ignore);
+  try {
+    const [cmd, cmdArgs] = IS_WIN ? ['cmd.exe', ['/d', '/s', '/c', p.login]] : [process.env.SHELL || '/bin/sh', ['-lc', p.login]];
+    const code = await new Promise((resolve) => {
+      const child = spawn(cmd, cmdArgs, { stdio: 'inherit' });
+      child.on('error', () => resolve(-1));
+      child.on('exit', (c, sig) => resolve(sig ? 0 : c));
+    });
+    if (code === -1) fail(`could not run ${p.login}`);
+    console.log('');
+    console.log(code ? red(`✗ ${p.name} exited with code ${code}`) : `${p.name} ended · ${loginLeft()}`);
+  } finally {
+    process.off('SIGINT', ignore);
+  }
+}
+
+const CREDENTIAL_HELP = `usage: ccgw credential set --login "<command>" [--name <label>] [--status "<command>"] [--auto-login] [--renew-minutes N]
+       ccgw credential status | login [--window] | auto on|off | unset`;
+
+async function credential(args) {
+  const [sub = 'status'] = args;
+  const cfg = readConfig();
+  const p = provider(cfg);
+  if (sub === 'set') {
+    const login = flag(args, '--login');
+    if (!login) fail(CREDENTIAL_HELP);
+    const renew = flag(args, '--renew-minutes');
+    cfg.credential = {
+      ...cfg.credential,
+      login,
+      ...(flag(args, '--name') && { name: flag(args, '--name') }),
+      ...(flag(args, '--status') && { status: flag(args, '--status') }),
+      ...(renew && { renewMinutes: Number(renew) }),
+      ...(args.includes('--auto-login') && { autoLogin: true }),
+    };
+    writeConfig(cfg);
+    console.log(green(`✓ credential provider set: ${provider(cfg).name}`) + dim('  — run `ccgw restart` so the gateway picks it up'));
+    return;
+  }
+  if (sub === 'unset') {
+    delete cfg.credential;
+    writeConfig(cfg);
+    return console.log(green('✓ credential provider removed') + dim('  — run `ccgw restart`'));
+  }
+  if (!p) {
+    if (sub === 'status') return console.log(dim(`Credential: Claude Code's own login (${loginLeft()}). To have ccgw open another sign-in tool:\n  ${CREDENTIAL_HELP.split('\n')[0].replace('usage: ', '')}`));
+    fail(`no credential provider set.
+  ${CREDENTIAL_HELP}`);
+  }
+  if (sub === 'status') {
+    const who = statusLine(p);
+    const live = loginRunning(p);
+    console.log(`Credential: ${cyan(p.name)}${who ? `  ${who}` : ''}  ·  ${loginLeft()}${live ? dim('  · sign-in window open') : ''}`);
+    console.log(dim(`  auto sign-in ${p.autoLogin ? `on (${p.renewMinutes} min before expiry)` : 'off'} · login command: ${p.login}`));
+    return;
+  }
+  if (sub === 'login') {
+    if (loginRunning(p)) return console.log(dim(`${p.name} is already signing in — look for its terminal window.`));
+    // At a terminal, run it right here; elsewhere (scripts, --window) open a new window.
+    if (interactive() && !args.includes('--window')) return runLoginHere(p);
+    if (!openLogin(p)) fail(`could not open a terminal window — run \`${p.login}\` yourself`);
+    return console.log(green(`✓ opened ${p.name} sign-in in a new terminal window`) + dim('  — keep it open: it keeps the login current'));
+  }
+  if (sub === 'auto') {
+    const on = args[1] === 'on' ? true : args[1] === 'off' ? false : fail('usage: ccgw credential auto on|off');
+    cfg.credential.autoLogin = on;
+    writeConfig(cfg);
+    return console.log(green(`✓ auto sign-in ${on ? 'on' : 'off'}`) + dim('  — run `ccgw restart` to apply'));
+  }
+  fail(`unknown command: ccgw credential ${sub}\n  ${CREDENTIAL_HELP}`);
 }
 
 function tail(n) {
@@ -659,6 +752,11 @@ function help() {
   ccgw logs [-f]               show / follow the log
   ccgw update [--check]        install the latest release (--check: only report)
 
+  ccgw credential set --login "<cmd>" [--name X] [--status "<cmd>"] [--auto-login]
+                               a tool that keeps Claude Code's login fresh: ccgw opens it in a
+                               terminal when the login runs out and tells Desktop why
+  ccgw credential status | login [--window] | auto on|off | unset
+
   ccgw desktop gateway         switch Claude Desktop to gateway mode (starts ccgw if needed)
   ccgw desktop login           switch Claude Desktop to claude.ai login mode
   ccgw desktop toggle          switch to the other mode
@@ -756,6 +854,7 @@ async function run(cmd, args) {
     case 'gmail': return gmail(args);
     case 'figma': return figma(args);
     case 'permissions': case 'perms': return permissions(args);
+    case 'credential': case 'cred': return credential(args);
     case 'update': case 'upgrade': return update(args);
     case '-v': case '--version': case 'version': return console.log(VERSION);
     case 'menu': return menu();
@@ -777,10 +876,12 @@ async function menu() {
     const names = connectors().map((c) => c.name);
     const latest = cachedLatest();
     const outdated = isNewer(latest, VERSION);
+    const cred = provider(cfg);
     const header = panel([
       ['Gateway', up
         ? `${green('● running')}  ${dim(baseUrl(cfg))}${h.sessions ? dim(` · ${h.sessions} chat${h.sessions > 1 ? 's' : ''}`) : ''}`
         : `${red('○ stopped')}  ${dim('Claude Desktop cannot answer until it starts')}`],
+      ...(cred ? [['Login', `${cred.name}${(() => { const w = statusLine(cred); return w ? dim(` · ${w}`) : ''; })()}  ${loginLeft()}`]] : []),
       ...(desktopSupported ? [
         ['Desktop', mode === 'gateway' ? `${accent('◆')} gateway mode ${dim('(uses Claude Code)')}` : `◇ login mode ${dim('(claude.ai account)')}`],
         ['Connectors', names.length ? names.slice(0, 4).join(dim(', ')) + (names.length > 4 ? dim(` +${names.length - 4}`) : '') : dim('none')],
@@ -793,6 +894,7 @@ async function menu() {
       up ? { label: 'Stop', value: 'stop' } : { label: 'Start', value: 'start', hint: 'needed for gateway mode' },
       { label: 'Restart', value: 'restart', disabled: !up },
       { label: 'Connection info', value: 'info', hint: 'URL + key for Claude Desktop' },
+      ...(cred ? [{ label: `Sign in with ${cred.name}`, value: 'cred-login', hint: 'runs here, quit it to come back' }] : []),
       ...(desktopSupported ? [
         { section: 'Claude Desktop' },
         { label: 'Switch mode…', value: 'desktop', hint: mode === 'gateway' ? 'to claude.ai login' : 'to gateway' },
@@ -816,6 +918,7 @@ async function menu() {
         case 'stop': await stop(); break;
         case 'restart': await stop({ quiet: true }); await start([]); break;
         case 'info': printInfo(cfg); break;
+        case 'cred-login': await credential(['login']); break;
         case 'desktop': await desktopMenu(mode); break;
         case 'connectors': await connectorMenu(); break;
         case 'perms-bypass': await permissions(['bypass']); break;

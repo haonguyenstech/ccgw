@@ -211,6 +211,30 @@ for a single new connector. Re-adding a connector keeps its setting. Tools then
 act without confirmation — including sending email or editing designs. It
 restarts Desktop to apply (`--no-restart` skips that).
 
+## Login from another tool (credential provider)
+
+If something other than `claude /login` keeps your Claude Code login fresh — say a
+team tool that hands out a shared login and keeps it current while its terminal
+window stays open — tell ccgw about it:
+
+```sh
+ccgw credential set --login "my-tool login" --status "my-tool whoami" --auto-login
+ccgw restart
+```
+
+- The menu and `ccgw status` show who is signed in (first line of `--status`) and
+  how long the login has left.
+- **Sign in with my-tool** (menu) or `ccgw credential login` runs the login command
+  right in the current terminal; quit it to get back to the menu. `--window` opens it
+  in a new terminal window instead.
+- With `--auto-login`, the gateway opens that window by itself 10 minutes before the
+  login runs out (`--renew-minutes N`), once per token, unless it is already running.
+- Once the login has expired, Claude Desktop gets a plain error saying so instead of
+  an obscure API failure.
+
+`ccgw credential auto on|off` toggles the automatic window, `ccgw credential unset`
+removes the provider.
+
 ## Updating
 
 ```bash

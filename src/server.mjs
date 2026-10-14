@@ -19,6 +19,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { HOME_DIR, readConfig } from './config.mjs';
 import { findClaude } from './platform.mjs';
+import { provider, claudeToken, loginRunning, openLogin, timeLeft } from './credential.mjs';
 
 const cfg = readConfig();
 const PORT = Number(process.env.CCGW_PORT || cfg.port);
@@ -636,6 +637,53 @@ async function handleMessages(req, res) {
   session.input.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
 }
 
+// ---------------------------------------------------------------- credential provider
+
+// With a credential provider configured, an expired Claude Code login gets a
+// clear error in Desktop, and (autoLogin) the provider's sign-in opens in a
+// terminal window shortly before it runs out — once per token.
+const CRED = provider(cfg);
+let tokenCache = { at: 0, token: null };
+let openedFor = null;
+let openedAt = 0;
+
+function currentToken() {
+  if (Date.now() - tokenCache.at > 30_000) tokenCache = { at: Date.now(), token: claudeToken() };
+  return tokenCache.token;
+}
+
+function maybeOpenLogin(token, why) {
+  if (!CRED.autoLogin || openedFor === token.expiresAt || Date.now() - openedAt < 10 * 60_000) return false;
+  if (loginRunning(CRED)) return false;
+  openedFor = token.expiresAt;
+  openedAt = Date.now();
+  const ok = openLogin(CRED);
+  log('credential:', why, ok ? `— opened "${CRED.login}" in a terminal` : '— could not open a terminal');
+  return ok;
+}
+
+// Returns an error message when the login has run out, else null.
+function credentialProblem() {
+  if (!CRED) return null;
+  tokenCache.at = 0; // re-read on every request so a fresh sign-in is seen at once
+  const token = currentToken();
+  if (!token || token.expiresAt > Date.now()) return null;
+  const opened = maybeOpenLogin(token, 'login expired');
+  const running = !opened && loginRunning(CRED);
+  return `The Claude Code login expired. ${opened || running
+    ? `Finish signing in with ${CRED.name} in the Terminal window, then send the message again.`
+    : `Sign in again with ${CRED.name}: run \`ccgw credential login\` (or \`${CRED.login}\` in a terminal), then send the message again.`}`;
+}
+
+if (CRED) {
+  const t = claudeToken();
+  log(`credential provider: ${CRED.name}${!t ? ' · no Claude Code login found' : t.expiresAt > Date.now() ? ` · login ${timeLeft(t.expiresAt)} left` : ' · login expired'}${CRED.autoLogin ? ' · auto sign-in on' : ''}`);
+  setInterval(() => {
+    const token = currentToken();
+    if (token && token.expiresAt - Date.now() < CRED.renewMinutes * 60_000) maybeOpenLogin(token, `login ${timeLeft(token.expiresAt)} left`);
+  }, 60_000).unref();
+}
+
 // ---------------------------------------------------------------- http
 
 function json(res, status, body) {
@@ -686,6 +734,9 @@ const server = http.createServer(async (req, res) => {
     }
     if (req.method === 'POST' && p === '/v1/messages') {
       const body = await readBody(req);
+      const expired = credentialProblem();
+      // Not 401: Desktop's CLI turns that into a generic "run /login" and drops the message.
+      if (expired) return json(res, 400, errBody('invalid_request_error', expired));
       body._cliModel = cliModel(body, req.headers);
       return await handleMessages(body, res);
     }

@@ -20,7 +20,12 @@ const releases = http.createServer((req, res) => {
 });
 await new Promise((r) => releases.listen(0, '127.0.0.1', r));
 const releasesUrl = `http://127.0.0.1:${releases.address().port}`;
-const env = { ...process.env, CCGW_UPDATE_URL: releasesUrl, CCGW_HOME: home, CCGW_DESKTOP_DIR: desktopDir, CCGW_SKIP_AUTH_CHECK: '1', CCGW_NO_CLIPBOARD: '1', NO_COLOR: '1' };
+// A stand-in Claude Code login (valid for now) and a log of sign-in windows ccgw would open.
+const credFile = path.join(home, 'claude-credentials.json');
+const loginLog = path.join(home, 'logins.log');
+const writeToken = (expiresAt) => fs.writeFileSync(credFile, JSON.stringify({ claudeAiOauth: { expiresAt } }));
+writeToken(Date.now() + 5 * 3_600_000);
+const env = { ...process.env, CCGW_CLAUDE_CREDENTIALS: credFile, CCGW_LOGIN_LOG: loginLog, CCGW_UPDATE_URL: releasesUrl, CCGW_HOME: home, CCGW_DESKTOP_DIR: desktopDir, CCGW_SKIP_AUTH_CHECK: '1', CCGW_NO_CLIPBOARD: '1', NO_COLOR: '1' };
 fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ port, apiKey: 'sk-ccgw-smoke' }));
 
 const ccgw = (...args) => execFileSync(process.execPath, [path.join(root, 'bin/ccgw.mjs'), ...args], { env, encoding: 'utf8', timeout: 60_000 });
@@ -91,6 +96,25 @@ try {
       ccgw('connector', 'remove', 'acme', '--no-restart');
       check('connector remove', !ccgw('connector', 'list').includes('acme'));
     }
+  }
+
+  {
+    ccgw('credential', 'set', '--login', 'fake-login go', '--name', 'fake-login', '--status', 'echo client tester', '--auto-login');
+    const st = ccgw('credential', 'status');
+    check('credential status', st.includes('fake-login') && st.includes('client tester') && /4h \d+m left/.test(st), st.split('\n')[0]);
+    writeToken(Date.now() - 60_000);
+    ccgw('restart');
+    const r = await fetch(base + '/v1/messages', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] }) });
+    const body = await r.json();
+    check('expired login -> clear error', r.status === 400 && /login expired/.test(body.error?.message), body.error?.message);
+    const opened = fs.existsSync(loginLog) ? fs.readFileSync(loginLog, 'utf8').trim().split('\n') : [];
+    check('expired login opens the sign-in once', opened.length === 1 && opened[0] === 'fake-login go', JSON.stringify(opened));
+    await fetch(base + '/v1/messages', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: '{"messages":[{"role":"user","content":"hi"}]}' });
+    check('no second sign-in window', fs.readFileSync(loginLog, 'utf8').trim().split('\n').length === 1);
+    writeToken(Date.now() + 5 * 3_600_000);
+    ccgw('credential', 'unset');
+    ccgw('restart');
+    check('credential unset', ccgw('credential', 'status').includes("Claude Code's own login"));
   }
 
   check('update --check reports newer release', (await ccgwAsync('update', '--check')).stdout.includes('v99.0.0 is available'));
