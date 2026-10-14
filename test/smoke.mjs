@@ -33,6 +33,9 @@ const ccgw = (...args) => execFileSync(process.execPath, [path.join(root, 'bin/c
 const ccgwAsync = (...args) => promisify(execFile)(process.execPath, [path.join(root, 'bin/ccgw.mjs'), ...args], { env, encoding: 'utf8', timeout: 60_000 });
 const base = `http://127.0.0.1:${port}`;
 const auth = { authorization: 'Bearer sk-ccgw-smoke' };
+// Node 20's fetch reuses a pooled keep-alive socket to the gateway that a restart
+// just closed and fails once; a retry goes out on a fresh connection.
+const fetchAfterRestart = (url, opts) => fetch(url, opts).catch(() => fetch(url, opts));
 let failed = 0;
 const check = (name, ok, extra = '') => { console.log(`${ok ? 'PASS' : 'FAIL'}  ${name} ${extra}`); if (!ok) failed++; };
 
@@ -104,12 +107,12 @@ try {
     check('credential status', st.includes('fake-login') && st.includes('client tester') && /4h \d+m left/.test(st), st.split('\n')[0]);
     writeToken(Date.now() - 60_000);
     ccgw('restart');
-    const r = await fetch(base + '/v1/messages', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] }) });
+    const r = await fetchAfterRestart(base + '/v1/messages', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] }) });
     const body = await r.json();
     check('expired login -> clear error', r.status === 400 && /login expired/.test(body.error?.message), body.error?.message);
     const opened = fs.existsSync(loginLog) ? fs.readFileSync(loginLog, 'utf8').trim().split('\n') : [];
     check('expired login opens the sign-in once', opened.length === 1 && opened[0] === 'fake-login go', JSON.stringify(opened));
-    await fetch(base + '/v1/messages', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: '{"messages":[{"role":"user","content":"hi"}]}' });
+    await fetchAfterRestart(base + '/v1/messages', { method: 'POST', headers: { ...auth, 'content-type': 'application/json' }, body: '{"messages":[{"role":"user","content":"hi"}]}' });
     check('no second sign-in window', fs.readFileSync(loginLog, 'utf8').trim().split('\n').length === 1);
     writeToken(Date.now() + 5 * 3_600_000);
     ccgw('credential', 'unset');
