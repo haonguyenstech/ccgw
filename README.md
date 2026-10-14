@@ -190,8 +190,10 @@ Signing in to figma.com:
 - **Windows** — Edge's cookies cannot be copied there (app-bound encryption), so on
   the first call Claude runs `figma_relogin`, which opens an Edge window at
   figma.com/login. Sign in once; refigma's own profile keeps the session.
-  Python: python.org (tick *Add python.exe to PATH*) or the Microsoft Store.
-  Windows needs refigma-mcp 0.5.0 or later.
+  Python is found even when it is not on PATH; without one, ccgw offers to install
+  Python 3.12 from python.org for your user (no admin) — `--install-python` skips
+  the question. The entry records python.exe's path, so Desktop's PATH does not
+  matter. Windows needs refigma-mcp 0.5.0 or later.
 
 ### Permission prompts
 

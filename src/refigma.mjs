@@ -4,6 +4,7 @@
 // It is a separate stdio server; ccgw only writes the Desktop entry that runs it,
 // either a pinned release tarball through npx or a local checkout (--path).
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { IS_MAC, IS_WIN } from './platform.mjs';
@@ -22,6 +23,43 @@ function edgeFound() {
 // The same order refigma tries; Windows' "python" may be the Microsoft Store stub, which fails this check.
 const pythonOk = (mod) => (IS_WIN ? [['python'], ['py', '-3']] : [['python3']]).some(([c, ...a]) =>
   spawnSync(c, [...a, '-c', `import sys; assert sys.version_info >= (3, 8)${mod ? `; import ${mod}` : ''}`], { stdio: 'ignore', windowsHide: true }).status === 0);
+
+// Windows: the absolute python.exe to give refigma (REFIGMA_PYTHON), so neither this terminal's nor Desktop's
+// PATH matters — a fresh install is only on the PATH of processes started after it. null when there is none.
+export function findPython() {
+  const exe = (c, a = []) => {
+    const r = spawnSync(c, [...a, '-c', 'import sys; assert sys.version_info >= (3, 8); print(sys.executable)'], { encoding: 'utf8', windowsHide: true });
+    const f = r.status === 0 && r.stdout.trim();
+    return f && fs.existsSync(f) ? f : null;
+  };
+  for (const [c, ...a] of [['python'], ['py', '-3'], ['python3']]) { const f = exe(c, a); if (f) return f; }
+  // installed but not on PATH ("Add python.exe to PATH" unticked): python.org's per-user and all-users folders
+  const bases = [process.env.LOCALAPPDATA && path.join(process.env.LOCALAPPDATA, 'Programs', 'Python'), process.env.ProgramFiles, process.env['ProgramFiles(x86)'], 'C:\\'];
+  for (const base of bases.filter(Boolean)) {
+    let dirs = [];
+    try { dirs = fs.readdirSync(base).filter((d) => /^Python3\d+/i.test(d)).sort((x, y) => y.localeCompare(x, 'en', { numeric: true })); } catch {}
+    for (const d of dirs) { const f = exe(path.join(base, d, 'python.exe')); if (f) return f; }
+  }
+  return null;
+}
+
+const PYTHON_INSTALLER = '3.12.10';
+
+// Windows: python.org's installer, per user (no admin, no UAC prompt), added to PATH. Returns python.exe or null.
+export async function installPython(log = () => {}) {
+  const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
+  const url = `https://www.python.org/ftp/python/${PYTHON_INSTALLER}/python-${PYTHON_INSTALLER}-${arch}.exe`;
+  const file = path.join(os.tmpdir(), `ccgw-python-${PYTHON_INSTALLER}-${arch}.exe`);
+  log(`downloading Python ${PYTHON_INSTALLER} (${arch}) from python.org…`);
+  const r = await fetch(url, { signal: AbortSignal.timeout(300_000) });
+  if (!r.ok) throw new Error(`download failed (HTTP ${r.status}): ${url}`);
+  fs.writeFileSync(file, Buffer.from(await r.arrayBuffer()));
+  log('installing for this user (no admin needed)…');
+  const res = spawnSync(file, ['/quiet', 'InstallAllUsers=0', 'PrependPath=1', 'Include_test=0', 'Include_launcher=0'], { stdio: 'ignore', windowsHide: true });
+  try { fs.rmSync(file); } catch {}
+  if (res.status !== 0) throw new Error(`the Python installer exited with ${res.status ?? res.error?.message}`);
+  return findPython();
+}
 
 export const tarballUrl = (v) => `https://github.com/${REPO}/releases/download/v${v}/refigma-mcp-${v}.tgz`;
 export const entryVersion = (entry) => entry?.args?.join(' ').match(/refigma-mcp-(\d[\w.-]*)\.tgz/)?.[1];
@@ -47,7 +85,7 @@ export function requirements(node) {
   if (!edgeFound()) out.push(`Microsoft Edge not found — install it${IS_MAC ? ' and sign in to figma.com' : ''}`);
   // macOS reads Edge's figma.com session with cryptography; Windows signs in once in an Edge window instead
   if (IS_MAC && !pythonOk('cryptography')) out.push('Python 3 with cryptography needed: python3 -m pip install cryptography');
-  if (IS_WIN && !pythonOk()) out.push('Python 3 needed: install it from python.org (tick "Add python.exe to PATH") or the Microsoft Store, then open a new terminal');
+  // Windows' Python is found or installed by the caller (findPython / installPython)
   return out;
 }
 
@@ -67,8 +105,9 @@ function npx(node) {
 }
 
 // A local checkout (--path) runs its server.mjs directly, so edits apply on the next Desktop restart.
-export function refigmaEntry(name, { node, version, dir }) {
-  const entry = { name, transport: 'stdio', ...(!IS_WIN && { env: { PATH: pathFor(node) } }) };
+export function refigmaEntry(name, { node, version, dir, python }) {
+  const env = IS_WIN ? (python && { REFIGMA_PYTHON: python }) : { PATH: pathFor(node) };
+  const entry = { name, transport: 'stdio', ...(env && { env }) };
   if (dir) return { ...entry, command: node, args: [path.join(dir, 'server.mjs')] };
   const { command, pre } = npx(node);
   return { ...entry, command, args: [...pre, '-y', tarballUrl(version)] };

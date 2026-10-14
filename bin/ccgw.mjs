@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { readConfig, writeConfig, newKey, PID_FILE, LOG_FILE, CONFIG_FILE, HOME_DIR } from '../src/config.mjs';
 import { gmailLogin, gmailLogout, readGmail, serveGmail, GMAIL_FILE } from '../src/gmail.mjs';
 import { installFigma, serveFigma, figmaStatus, registerPlugin, pluginRegistered, PLUGIN_MANIFEST, RELAY_PORT } from '../src/figma.mjs';
-import { latestVersion, requirements, supportsPlatform, refigmaEntry, entryVersion, probe } from '../src/refigma.mjs';
+import { latestVersion, requirements, supportsPlatform, refigmaEntry, entryVersion, probe, findPython, installPython } from '../src/refigma.mjs';
 import { interactive, select, prompt, panel, accent } from '../src/menu.mjs';
 import { logo } from '../src/logo.mjs';
 import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/update.mjs';
@@ -523,7 +523,8 @@ async function addRefigma(id, preset, list, args) {
   if (dir && !fs.existsSync(path.join(dir, 'server.mjs'))) fail(`${dir}: no server.mjs (expected a refigma-mcp checkout)`);
   const version = dir ? null : (flag(args, '--version') || await latestVersion()).replace(/^v/, '');
   if (!supportsPlatform(version)) fail(`refigma-mcp ${version} does not run on Windows — use 0.5.0 or later`);
-  const entry = refigmaEntry(id, { node, version, dir });
+  const python = IS_WIN ? await ensurePython(args) : null;
+  const entry = refigmaEntry(id, { node, version, dir, python });
   const before = entryVersion(list.find((c) => c.name === id));
 
   console.log(dim(`  starting refigma-mcp ${dir ? `from ${dir}` : `v${version}`} once${dir ? '' : ' (npx downloads it the first time)'}…`));
@@ -538,6 +539,25 @@ async function addRefigma(id, preset, list, args) {
     ? '  First use: Claude runs figma_relogin, which opens an Edge window at figma.com/login — sign in there once.'
     : '  It signs in with your Edge figma.com session: the first call asks for the Keychain once — click Allow.'));
   if (getMode() !== '3p') console.log(dim('  Note: Desktop is in login mode; connectors apply in gateway mode (ccgw desktop gateway).'));
+}
+
+// Windows: refigma needs Python 3. Found even when it is not on PATH; otherwise installed
+// per user after asking (--install-python skips the question).
+async function ensurePython(args) {
+  const found = findPython();
+  if (found) return found;
+  const how = 'Install Python 3 from python.org (tick "Add python.exe to PATH") or the Microsoft Store, or run again with --install-python.';
+  const yes = args.includes('--install-python') || (interactive() &&
+    !/^n/i.test(await prompt('refigma needs Python 3, which is not installed. Install Python 3.12 for this user now (no admin, ~27 MB)?', { placeholder: '(Y/n)' }) || ''));
+  if (!yes) fail(`refigma-mcp needs Python 3. ${how}`);
+  try {
+    const py = await installPython((m) => console.log(dim(`  ${m}`)));
+    if (!py) fail(`Python was installed but not found afterwards. ${how}`);
+    console.log(green(`  ✓ Python installed`) + dim(`  (${py})`));
+    return py;
+  } catch (e) {
+    fail(`could not install Python: ${e.message}\n  ${how}`);
+  }
 }
 
 async function permissions(args) {
@@ -654,7 +674,7 @@ function help() {
   ccgw gmail status | login | logout               manage the Gmail sign-in
   ccgw connector add figma-local   Figma via a Figma Desktop plugin (no plan limits)
   ccgw figma status | plugin       check the bridge / add the plugin to Figma Desktop (--restart-figma)
-  ccgw connector add refigma [--version x.y.z | --path <dir>]   Figma links → code via refigma-mcp (macOS, Windows)
+  ccgw connector add refigma [--version x.y.z | --path <dir>] [--install-python]   Figma links → code via refigma-mcp (macOS, Windows)
   (presets: clickup, linear, notion, atlassian, sentry, figma, figma-local, gmail, refigma; --no-restart to skip restart)
 
   config: ${CONFIG_FILE}
