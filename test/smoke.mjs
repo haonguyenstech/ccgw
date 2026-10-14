@@ -76,7 +76,7 @@ try {
       fs.writeFileSync(path.join(checkout, 'server.mjs'), `process.stdin.once('data', (d) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: JSON.parse(d).id, result: { serverInfo: { name: 'refigma-mcp' } } }) + '\\n'));`);
       let refigma;
       try { refigma = ccgw('connector', 'add', 'refigma', '--path', checkout, '--no-restart'); } catch (e) { refigma = String(e.stderr); }
-      check('connector add refigma', process.platform === 'win32' ? refigma.includes('macOS only') : refigma.includes('added') || refigma.includes('cannot run here'), refigma.trim().split('\n').at(-1));
+      check('connector add refigma', refigma.includes('added') || refigma.includes('cannot run here'), refigma.trim().split('\n').at(-1));
       ccgw('desktop', 'profile'); // rewriting the gateway profile must keep connectors
       const list = ccgw('connector', 'list');
       check('connectors survive profile rewrite', list.includes('clickup') && list.includes('acme'), list.trim().split('\n')[0]);

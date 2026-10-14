@@ -78,7 +78,7 @@ Desktop to load it; `--no-restart` skips that. They live in the "Claude Code
 | `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`, `figma` | the provider's remote MCP server | OAuth in the browser, from Desktop |
 | `gmail` | local MCP server over the Gmail API | your own Google OAuth client, once |
 | `figma-local` | Figma Desktop through a plugin, **no plan limits** | none; run the plugin in Figma |
-| `refigma` | Figma links → HTML / React + Tailwind, SVG, tokens via [refigma-mcp](https://github.com/haonguyenstech/refigma-mcp); a **View seat** is enough (macOS) | your figma.com session in Microsoft Edge |
+| `refigma` | Figma links → HTML / React + Tailwind, SVG, tokens via [refigma-mcp](https://github.com/haonguyenstech/refigma-mcp); a **View seat** is enough | macOS: your figma.com session in Edge; Windows: sign in once in an Edge window |
 
 ### Remote connectors (OAuth)
 
@@ -176,13 +176,22 @@ ccgw connector add refigma --version 0.4.0    # pin a release
 ccgw connector add refigma --path ~/refigma-mcp   # run a local checkout
 ```
 
-Needs macOS, Microsoft Edge signed in to figma.com, Node ≥ 22.15 and Python 3
-with `cryptography`; ccgw checks these and starts the server once before writing
-the entry, so npx's first download does not happen inside Desktop's startup. The
-entry stays on the version it was added with; run the same command again to move
-to the latest release. The first Figma call asks for the Keychain (to read Edge's
-cookies) — click **Allow**. Then paste a link (right-click a frame → *Copy link
-to selection*) and ask, e.g. *"turn this frame into React"*.
+Needs Microsoft Edge, Node ≥ 22.15 and Python 3 (on macOS with `cryptography`);
+ccgw checks these and starts the server once before writing the entry, so npx's
+first download does not happen inside Desktop's startup. The entry stays on the
+version it was added with; run the same command again to move to the latest
+release. Then paste a link (right-click a frame → *Copy link to selection*) and
+ask, e.g. *"turn this frame into React"*.
+
+Signing in to figma.com:
+
+- **macOS** — refigma copies the session from your Edge. The first Figma call asks
+  for the Keychain (to read Edge's cookies): click **Allow**.
+- **Windows** — Edge's cookies cannot be copied there (app-bound encryption), so on
+  the first call Claude runs `figma_relogin`, which opens an Edge window at
+  figma.com/login. Sign in once; refigma's own profile keeps the session.
+  Python: python.org (tick *Add python.exe to PATH*) or the Microsoft Store.
+  Windows needs refigma-mcp 0.5.0 or later.
 
 ### Permission prompts
 
