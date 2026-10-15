@@ -210,7 +210,8 @@ export function select(title, items, { initial = 0 } = {}) {
 }
 
 // Resolves to the ticked items' values (in list order), or null on Esc / q /
-// Ctrl+C. Space ticks, a ticks or clears all, enter confirms.
+// Ctrl+C. Space ticks, a ticks or clears all, enter confirms; with nothing
+// ticked, enter takes the highlighted item, as a one-item pick would.
 // items: [{ label, value, hint?, checked? } | { section: 'NAME' }]
 export function checklist(title, items) {
   return new Promise((resolve) => {
@@ -240,7 +241,7 @@ export function checklist(title, items) {
         lines.push(`  ${on ? accent(G.pointer) : ' '} ${mark} ${on ? bold(accent(label)) : label}${hint}`);
       });
       const shown = view([...(Array.isArray(title) ? title : [bold(title)]), ''], lines, at,
-        ['', dim(`  ${G.keys} · space tick · a all/none · enter confirm (${ticked.size} ticked) · esc back`)]);
+        ['', dim(`  ${G.keys} · space tick · a all/none · enter ${ticked.size ? `sync ${ticked.size} ticked` : 'sync the highlighted one'} · esc back`)]);
       stdout.write(shown.map((l) => fit(l)).join('\n') + '\n');
       drawn = shown.length;
     };
@@ -265,7 +266,10 @@ export function checklist(title, items) {
       if (to !== undefined) { cursor = pickable[Math.max(0, Math.min(pickable.length - 1, to))]; return render(); }
       if (key.name === 'space') { ticked.has(cursor) ? ticked.delete(cursor) : ticked.add(cursor); return render(); }
       if (str === 'a') { if (ticked.size === pickable.length) ticked.clear(); else pickable.forEach((i) => ticked.add(i)); return render(); }
-      if (key.name === 'return' || key.name === 'enter') return done(pickable.filter((i) => ticked.has(i)).map((i) => items[i].value));
+      if (key.name === 'return' || key.name === 'enter') {
+        if (!ticked.size) ticked.add(cursor);
+        return done(pickable.filter((i) => ticked.has(i)).map((i) => items[i].value));
+      }
       if (key.name === 'escape' || key.name === 'q' || key.name === 'left') return done(null);
     };
 

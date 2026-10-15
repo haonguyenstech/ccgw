@@ -1309,12 +1309,12 @@ async function sync(args) {
   } else if (interactive()) {
     picked = await checklist(`${bold('Sync from the official Desktop')}  ${dim('claude.ai → gateway · tick what to copy')}`, [
       { section: 'Projects' },
-      ...projects.map((p) => ({ label: p.name, value: p.uuid, hint: `${plural(inProject(p.uuid).length, 'chat')} · ${fresh(inProject(p.uuid))} new or changed`, checked: !!state.projects[p.uuid] })),
+      ...projects.map((p) => ({ label: p.name, value: p.uuid, hint: `${plural(inProject(p.uuid).length, 'chat')} · ${fresh(inProject(p.uuid))} new or changed`})),
       { section: 'Other' },
       { label: 'Chats outside projects', value: OUTSIDE, hint: `${plural(outside.length, 'chat')} · ${fresh(outside)} new or changed` },
-      { label: 'Skills', value: SKILLS, hint: skillHint, checked: newSkills > 0 },
+      { label: 'Skills', value: SKILLS, hint: skillHint },
     ]);
-    if (!picked?.length) return;
+    if (!picked) return console.log(dim('Sync cancelled.'));
   } else {
     fail('usage: ccgw sync [--project <name>]… [--all-projects] [--chats] [--skills] [--all] [--since <days>] [--list] [--no-restart]');
   }
@@ -1444,12 +1444,12 @@ async function syncToOfficial(args) {
   } else if (interactive()) {
     picked = await checklist(`${bold('Sync to the official Desktop')}  ${dim('gateway → claude.ai · tick what to copy')}`, [
       { section: 'Projects' },
-      ...spaces.map((sp) => ({ label: sp.name, value: sp.id, hint: `${plural(inSpace(sp.id).length, 'chat')} · ${fresh(inSpace(sp.id))} new or changed ${target(sp)}`, checked: !!out.projects[sp.id] })),
+      ...spaces.map((sp) => ({ label: sp.name, value: sp.id, hint: `${plural(inSpace(sp.id).length, 'chat')} · ${fresh(inSpace(sp.id))} new or changed ${target(sp)}`})),
       { section: 'Other' },
       { label: 'Chats outside projects', value: OUTSIDE, hint: `${plural(outside.length, 'chat')} · ${fresh(outside)} new or changed → "${GATEWAY_CHATS}"` },
-      { label: 'Skills', value: SKILLS, hint: skills.length ? `${skills.length} · ${newSkills.length} new` : 'none added to the gateway', checked: newSkills.length > 0 },
+      { label: 'Skills', value: SKILLS, hint: skills.length ? `${skills.length} · ${newSkills.length} new` : 'none added to the gateway' },
     ]);
-    if (!picked?.length) return;
+    if (!picked) return console.log(dim('Sync cancelled.'));
   } else {
     fail('usage: ccgw sync --to-official [--project <name>]… [--all-projects] [--chats] [--skills] [--all] [--since <days>] [--list]');
   }

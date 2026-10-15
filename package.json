@@ -1,6 +1,6 @@
 {
   "name": "ccgw",
-  "version": "0.3.18",
+  "version": "0.3.19",
   "description": "Use your Claude Code CLI login as an inference gateway for Claude Desktop",
   "type": "module",
   "bin": {

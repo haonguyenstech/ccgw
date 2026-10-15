@@ -191,7 +191,7 @@ ccgw status
 Chats you had in the official Desktop live on claude.ai; the gateway Desktop keeps its own on disk. `ccgw sync` (or *Sync from official…* in the menu) copies them across, on macOS and Windows:
 
 ```bash
-ccgw sync                              # tick projects, "Chats outside projects" and "Skills"
+ccgw sync                              # space ticks projects, "Chats outside projects", "Skills"; enter syncs (the highlighted one if none ticked)
 ccgw sync --project "Demo Pro" --skills
 ccgw sync --all --since 7              # everything changed in the last 7 days
 ccgw sync --list                       # what there is, and how much is new
