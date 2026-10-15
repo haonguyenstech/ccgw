@@ -22,6 +22,22 @@ const visible = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 const width = (s) => [...visible(s)].length;
 const pad = (s, n) => s + ' '.repeat(Math.max(0, n - width(s)));
 
+// Cuts a line to the terminal's width (keeping colour codes), so none wraps:
+// a redraw moves up by the lines it drew, and a wrapped one would leave a
+// copy of the top line behind on every keypress.
+function fit(line, max = (process.stdout.columns || 80) - 1) {
+  if (width(line) <= max) return line;
+  let out = '', n = 0;
+  for (const part of line.split(/(\x1b\[[0-9;?]*[A-Za-z])/)) {
+    if (part.startsWith('\x1b[')) { out += part; continue; }
+    for (const ch of part) {
+      if (n >= max - 1) return `${out}…${ESC}0m`;
+      out += ch; n++;
+    }
+  }
+  return out;
+}
+
 // A rounded box of "key   value" rows, for the status header.
 export function panel(rows) {
   const keyW = Math.max(...rows.map(([k]) => width(k)));
@@ -112,7 +128,7 @@ export function select(title, items, { initial = 0 } = {}) {
         else lines.push(`    ${dim(n)}${label}${hint}`);
       });
       lines.push('', dim(`  ${G.keys} · enter select${numbered ? ' · 1-' + pickable.length + ' jump' : ''} · esc back`));
-      stdout.write(lines.join('\n') + '\n');
+      stdout.write(lines.map((l) => fit(l)).join('\n') + '\n');
       drawn = lines.length;
     };
 
@@ -187,7 +203,7 @@ export function checklist(title, items) {
         lines.push(`  ${on ? accent(G.pointer) : ' '} ${mark} ${on ? bold(accent(label)) : label}${hint}`);
       });
       lines.push('', dim(`  ${G.keys} · space tick · a all/none · enter confirm (${ticked.size} ticked) · esc back`));
-      stdout.write(lines.join('\n') + '\n');
+      stdout.write(lines.map((l) => fit(l)).join('\n') + '\n');
       drawn = lines.length;
     };
 
