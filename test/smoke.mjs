@@ -63,6 +63,22 @@ try {
 
   if (process.platform === 'darwin' || process.platform === 'win32') {
     check('desktop status', ccgw('desktop', 'status').includes('Claude Desktop:'));
+    check('desktop open switches to gateway when needed', ccgw('desktop', 'open').includes('switched to gateway mode'));
+    check('desktop open without a restart once on the profile', ccgw('desktop', 'open').includes('gateway Claude Desktop open'));
+    if (process.platform === 'darwin') {
+      // The official instance keeps its session: only deploymentMode is set.
+      const off = path.join(desktopDir, 'official', 'Claude-Official');
+      fs.mkdirSync(off, { recursive: true });
+      fs.mkdirSync(`${off}-3p`, { recursive: true });
+      const session = JSON.stringify({ lastKnownAccountUuid: 'acct', 'oauth:tokenCacheV2': 'tok' });
+      fs.writeFileSync(path.join(off, 'config.json'), session);
+      fs.writeFileSync(path.join(`${off}-3p`, 'claude_desktop_config.json'), JSON.stringify({ deploymentMode: '3p', keep: 1 }));
+      check('desktop official open', ccgw('desktop', 'official').includes('official Claude Desktop open'));
+      const offConf = JSON.parse(fs.readFileSync(path.join(`${off}-3p`, 'claude_desktop_config.json'), 'utf8'));
+      check('desktop official sets 1p, keeps the rest', offConf.deploymentMode === '1p' && offConf.keep === 1);
+      check('desktop official leaves the session alone', fs.readFileSync(path.join(off, 'config.json'), 'utf8') === session);
+      check('desktop official status', ccgw('desktop', 'official', 'status').includes('signed in'));
+    }
     // CCGW_DESKTOP_DIR keeps these off the real Desktop config and process.
     {
       check('connector add', ccgw('connector', 'add', 'clickup', '--no-restart').includes('added'));

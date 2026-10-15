@@ -46,6 +46,9 @@ Run `ccgw` with no arguments and you get a status panel (gateway, login, Desktop
 ### 🔁 Switch Desktop modes without logging out
 `ccgw desktop gateway` / `ccgw desktop login` flips Claude Desktop between the gateway and your claude.ai account. Both sessions survive the switch.
 
+### 🪟 Gateway and claude.ai side by side
+`ccgw desktop official` opens a second Claude Desktop signed in to your claude.ai account next to the gateway one (macOS and Windows). `ccgw desktop open` opens the gateway one. Restarting either never logs the other out.
+
 ### 🧩 Connectors from the terminal
 Gateway mode has no claude.ai connector directory, so ccgw adds them for you:
 
@@ -316,6 +319,13 @@ flowchart LR
 
 Desktop keeps each mode in its own data dir: claude.ai login in `~/Library/Application Support/Claude` (`%APPDATA%\Claude` on Windows), gateway in `…/Claude-3p` (`%LOCALAPPDATA%\Claude-3p`). It picks one from `deploymentMode` in `Claude-3p/claude_desktop_config.json`. Switching from Desktop's own UI goes through sign-out and clears credentials; `ccgw desktop login|gateway` quits Desktop, flips the key and reopens it, so both sessions survive.
 
+### Running both at once
+
+Desktop reads the mode only when it starts, and keeps one process per data dir.
+
+- **macOS**: the official instance runs from its own data dir (`--user-data-dir=~/Library/Application Support/Claude-Official`), which reads its mode from `Claude-Official-3p/`, set to `1p`. Desktop does not refuse a second process on the same dir, so ccgw brings a running instance forward by pid instead of launching it again, and quits the gateway one by pid so the official one is never hit. Signing in ends with a `claude://` link that macOS hands to the gateway Desktop, which drops it, so the first sign-in closes the gateway Desktop until it is done and reopens it after.
+- **Windows**: Desktop always reads the mode from `%LOCALAPPDATA%\Claude-3p`, and the Store (MSIX) build takes no arguments or environment from outside. So the official instance is Desktop's own claude.ai-mode one (`%APPDATA%\Claude`): ccgw sets the mode to `1p`, starts it, and sets `3p` back once it is up. The two are told apart by their child processes' data dir. A sign-in link starts a new Desktop process that picks its data dir from the mode and hands the link to the instance holding it, so the mode stays `1p` until you are signed in; the gateway Desktop keeps running.
+
 ### Limits
 
 - Usage counts against the Claude Code account's plan limits. Cowork sends a ~100K-token system prompt at the start of each conversation.
@@ -338,6 +348,9 @@ Desktop keeps each mode in its own data dir: claude.ai login in `~/Library/Appli
 | `ccgw desktop gateway` | switch Desktop to gateway mode (starts ccgw, writes + selects the "Claude Code (ccgw)" profile) |
 | `ccgw desktop login` | switch Desktop back to claude.ai login mode |
 | `ccgw desktop toggle` / `status` | flip modes / show current mode |
+| `ccgw desktop open` | open the gateway Desktop (starts ccgw; restarts Desktop only if it needs switching) |
+| `ccgw desktop official [--sign-in]` | open a claude.ai-signed-in Desktop next to the gateway one; the first time (or with `--sign-in`) it waits for you to sign in |
+| `ccgw desktop official status` / `quit` | is it running and signed in / quit it, keeping the sign-in |
 | `ccgw connector add <preset>` | add a connector to Desktop, see [Connectors](#connectors) |
 | `ccgw connector list` / `remove <name>` | |
 | `ccgw permissions [bypass\|ask] [name]` | skip or restore Desktop's per-tool permission prompts |

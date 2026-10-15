@@ -83,37 +83,117 @@ export const desktopSupported = IS_MAC || IS_WIN;
 // Desktop's install locations (Squirrel under AnthropicClaude, or MSIX).
 const WIN_DESKTOP_FILTER = `Get-Process claude -ErrorAction SilentlyContinue | Where-Object { $_.Path -match '\\\\AnthropicClaude\\\\|\\\\WindowsApps\\\\' }`;
 
-function desktopPids() {
+// Each main Desktop process (no --type=) with the data dir its children were
+// started with: the main process's own command line does not carry it.
+const WIN_DESKTOP_PROCS = `$all = @(Get-CimInstance Win32_Process -Filter "Name='claude.exe'" | Where-Object { $_.ExecutablePath -match '\\\\AnthropicClaude\\\\|\\\\WindowsApps\\\\' }); foreach ($m in $all | Where-Object { $_.CommandLine -notmatch '--type=' }) { $d = ''; foreach ($k in $all | Where-Object { $_.ParentProcessId -eq $m.ProcessId -and $_.CommandLine -notmatch 'crashpad' }) { $x = [regex]::Match($k.CommandLine, '--user-data-dir=("[^"]+"|\\S+)'); if ($x.Success) { $d = $x.Groups[1].Value.Trim('"'); break } }; "$($m.ProcessId)\`t$d" }`;
+
+// A second, claude.ai-signed-in Desktop can run next to the gateway one.
+// macOS: started with its own --user-data-dir, it reads deploymentMode from
+// "<dir>-3p". Windows: the mode always comes from %LOCALAPPDATA%\Claude-3p and
+// is read only at startup, so the official instance is Desktop's own
+// claude.ai-mode one, started while the mode says "1p" (the caller flips it).
+// A claude:// link (sign-in) starts a new Desktop process there, which picks
+// its data dir from the mode and hands the link to the instance holding it.
+export const officialSupported = IS_MAC || IS_WIN;
+
+export function officialDir() {
+  if (FAKE_DESKTOP) return path.join(process.env.CCGW_DESKTOP_DIR, 'official', 'Claude-Official');
+  if (IS_WIN) {
+    // MSIX keeps the app's %APPDATA% in the package's LocalCache.
+    const pkgs = path.join(process.env.LOCALAPPDATA || '', 'Packages');
+    try {
+      const fam = fs.readdirSync(pkgs).find((d) => /^Claude_[a-z0-9]+$/i.test(d));
+      const virt = fam && path.join(pkgs, fam, 'LocalCache', 'Roaming', 'Claude');
+      if (virt && fs.existsSync(virt)) return virt;
+    } catch {}
+    return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Claude');
+  }
+  return path.join(os.homedir(), 'Library', 'Application Support', 'Claude-Official');
+}
+
+// Main Desktop processes, tagged with whether they are the official instance.
+function desktopProcs() {
   if (FAKE_DESKTOP) return [];
   try {
-    if (IS_MAC) return run('pgrep', ['-x', 'Claude']).split(/\s+/).filter(Boolean);
-    if (IS_WIN) return ps(`${WIN_DESKTOP_FILTER} | ForEach-Object { $_.Id }`).split(/\s+/).filter(Boolean);
+    if (IS_MAC) {
+      const pids = run('pgrep', ['-x', 'Claude']).split(/\s+/).filter(Boolean);
+      if (!pids.length) return [];
+      const flag = `--user-data-dir=${officialDir()}`;
+      return run('ps', ['-o', 'pid=,command=', '-p', pids.join(',')]).split('\n').filter(Boolean).map((line) => {
+        const [, pid, cmd] = line.match(/^\s*(\d+)\s+(.*)$/) || [];
+        return { pid, official: !!cmd && cmd.includes(flag) };
+      }).filter((p) => p.pid);
+    }
+    if (IS_WIN) {
+      // Anything not on the gateway's Claude-3p dir is the claude.ai-mode one.
+      const gw = path.basename(desktop3pDir()).toLowerCase();
+      return ps(WIN_DESKTOP_PROCS).split(/\r?\n/).filter(Boolean).map((line) => {
+        const [pid, dir = ''] = line.split('\t');
+        return { pid: pid.trim(), dir, official: !!dir && path.basename(dir.trim()).toLowerCase() !== gw };
+      }).filter((p) => p.pid);
+    }
   } catch {}
   return [];
 }
 
+// The gateway Desktop only: the official instance is never quit or relaunched
+// by anything that restarts the gateway one.
+const desktopPids = () => desktopProcs().filter((p) => !p.official).map((p) => p.pid);
+const officialPids = () => desktopProcs().filter((p) => p.official).map((p) => p.pid);
+
 export const desktopRunning = () => desktopPids().length > 0;
+export const officialRunning = () => officialPids().length > 0;
+
+// Brings a running instance forward by pid. Starting Desktop again is no way
+// to do that: it does not hold a single-instance lock per data dir, so a
+// second process would run on the same profile.
+function activate(pid) {
+  try {
+    if (IS_WIN) return ps(`[void](New-Object -ComObject WScript.Shell).AppActivate(${Number(pid)})`);
+    run('osascript', ['-l', 'JavaScript', '-e',
+      `ObjC.import('AppKit'); var a = $.NSRunningApplication.runningApplicationWithProcessIdentifier(${Number(pid)}); a.isNil() ? false : a.activateWithOptions($.NSApplicationActivateAllWindows)`]);
+  } catch {}
+}
+
+const signal = (pids, sig) => { for (const pid of pids) { try { process.kill(Number(pid), sig); } catch {} } };
+// Windows has no graceful signal for a GUI app; /T takes the instance's own
+// renderers and helpers with it and nothing else.
+const killTree = (pids) => { for (const pid of pids) { try { run('taskkill.exe', ['/PID', String(pid), '/T', '/F']); } catch {} } };
 
 // Desktop's quit runs cleanup (Cowork VM, MCP servers) that can take a while;
 // wait for it to be fully gone, or a relaunch lands on the dying instance.
+// With the official instance up, "quit app" could hit either one, so the
+// gateway one is quit by pid (SIGTERM is a normal quit for Electron).
 export async function quitDesktop() {
   if (!desktopRunning()) return false;
+  const byPid = officialRunning();
   try {
-    if (IS_MAC) run('osascript', ['-e', 'quit app "Claude"']);
+    if (byPid) IS_WIN ? killTree(desktopPids()) : signal(desktopPids(), 'SIGTERM');
+    else if (IS_MAC) run('osascript', ['-e', 'quit app "Claude"']);
     // Closing the window only hides Desktop to the tray on Windows.
-    if (IS_WIN) ps(`${WIN_DESKTOP_FILTER} | Stop-Process -Force`);
+    else if (IS_WIN) ps(`${WIN_DESKTOP_FILTER} | Stop-Process -Force`);
   } catch {}
   for (let i = 0; i < 150 && desktopRunning(); i++) await sleep(200);
   if (desktopRunning()) {
-    try { IS_MAC ? run('pkill', ['-x', 'Claude']) : ps(`${WIN_DESKTOP_FILTER} | Stop-Process -Force`); } catch {}
+    try {
+      if (byPid) IS_WIN ? killTree(desktopPids()) : signal(desktopPids(), 'SIGKILL');
+      else IS_MAC ? run('pkill', ['-x', 'Claude']) : ps(`${WIN_DESKTOP_FILTER} | Stop-Process -Force`);
+    } catch {}
     for (let i = 0; i < 25 && desktopRunning(); i++) await sleep(200);
   }
   return true;
 }
 
 function launchDesktop() {
-  if (IS_MAC) return run('open', ['-a', 'Claude']);
+  if (IS_MAC) {
+    const [pid] = desktopPids();
+    if (pid) return activate(pid);
+    // `open -a` would only bring the official instance forward.
+    return run('open', officialRunning() ? ['-n', '-a', 'Claude'] : ['-a', 'Claude']);
+  }
   if (IS_WIN) {
+    const [pid] = desktopPids();
+    if (pid) return activate(pid);
     const squirrel = path.join(process.env.LOCALAPPDATA || '', 'AnthropicClaude', 'claude.exe');
     if (fs.existsSync(squirrel)) {
       spawn(squirrel, [], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
@@ -123,12 +203,25 @@ function launchDesktop() {
   }
 }
 
+function launchOfficial() {
+  if (IS_MAC) return run('open', ['-n', '-a', 'Claude', '--args', `--user-data-dir=${officialDir()}`]);
+  const squirrel = path.join(process.env.LOCALAPPDATA || '', 'AnthropicClaude', 'claude.exe');
+  if (fs.existsSync(squirrel)) {
+    spawn(squirrel, [], { detached: true, stdio: 'ignore', windowsHide: false }).unref();
+    return;
+  }
+  ps(`$a = Get-StartApps | Where-Object { $_.Name -eq 'Claude' } | Select-Object -First 1; if ($a) { Start-Process ("shell:AppsFolder\\" + $a.AppID) }`);
+}
+
 // Succeeds only once a Desktop process that wasn't there before shows up.
 export async function openDesktop() {
   if (FAKE_DESKTOP) return true;
   const before = new Set(desktopPids());
   if (before.size) { try { launchDesktop(); } catch {} return true; } // just bring it forward
-  const started = () => desktopPids().some((p) => !before.has(p));
+  // On Windows a launch in login mode comes up as the claude.ai-mode instance.
+  const pids = IS_WIN ? () => desktopProcs().map((p) => p.pid) : desktopPids;
+  const old = new Set(pids());
+  const started = () => pids().some((p) => !old.has(p));
   for (let i = 0; i < 10; i++) {
     try { launchDesktop(); } catch {}
     for (let j = 0; j < 10; j++) {
@@ -137,6 +230,30 @@ export async function openDesktop() {
     }
   }
   return false;
+}
+
+// Resolves once the official instance is up. On Windows it is told apart by
+// its children's data dir, which only exist once it is past the mode read; one
+// that read "3p" hands off to the gateway instance and exits.
+export async function openOfficial() {
+  if (FAKE_DESKTOP) return true;
+  const [running] = officialPids();
+  if (running) { activate(running); return true; }
+  try { launchOfficial(); } catch { return false; }
+  for (let i = 0; i < 100; i++) {
+    await sleep(300);
+    if (officialRunning()) return true;
+  }
+  return false;
+}
+
+export async function quitOfficial() {
+  if (!officialRunning()) return false;
+  if (IS_WIN) killTree(officialPids());
+  else signal(officialPids(), 'SIGTERM');
+  for (let i = 0; i < 150 && officialRunning(); i++) await sleep(200);
+  if (officialRunning()) IS_WIN ? killTree(officialPids()) : signal(officialPids(), 'SIGKILL');
+  return true;
 }
 
 // ---------------------------------------------------------------- Figma Desktop

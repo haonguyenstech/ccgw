@@ -16,7 +16,8 @@ import { provider, claudeToken, timeLeft, statusLine, loginRunning, openLogin } 
 import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/update.mjs';
 import {
   IS_WIN, sleep, findClaude, claudeAuthStatus, copyToClipboard,
-  desktop3pDir, desktopSupported, quitDesktop, openDesktop,
+  desktop3pDir, desktopSupported, quitDesktop, openDesktop, desktopRunning,
+  officialSupported, officialDir, officialRunning, openOfficial, quitOfficial,
 } from '../src/platform.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -707,6 +708,104 @@ async function withDesktopClosed(fn) {
   if (!(await openDesktop())) console.log(dim('  (could not reopen Claude Desktop — start it manually)'));
 }
 
+// Opens the gateway Desktop. One already on our profile with the current URL
+// and key is just started or brought forward; otherwise it is switched over
+// (which restarts it).
+async function openGateway() {
+  await start([]);
+  const cfg = readConfig();
+  const meta = readJson(META_FILE, { entries: [] });
+  const applied = meta.entries?.find((e) => e.id === meta.appliedId);
+  const prof = applied?.name === PROFILE_NAME ? readJson(path.join(LIB_DIR, `${applied.id}.json`), {}) : {};
+  const ready = getMode() === '3p' && prof.inferenceGatewayBaseUrl === baseUrl(cfg) && prof.inferenceGatewayApiKey === cfg.apiKey;
+  if (!ready) return desktop(['gateway']);
+  if (!(await openDesktop())) fail('could not start Claude Desktop');
+  console.log(green('✓ gateway Claude Desktop open') + dim(`  (profile: ${PROFILE_NAME})`));
+}
+
+// The official Desktop: a second instance, signed in to claude.ai, running
+// next to the gateway one from its own data dir. ccgw only ever sets
+// deploymentMode "1p" in its config; its session is never touched, and
+// nothing that restarts the gateway Desktop quits it.
+const OFFICIAL_DIR = officialDir();
+const OFFICIAL_3P_CONFIG = path.join(`${OFFICIAL_DIR}-3p`, 'claude_desktop_config.json');
+
+// Desktop records the account it last signed in to; the token cache changes
+// on every sign-in, so a fresh one is told apart from the previous session.
+function officialSession() {
+  const conf = readJson(path.join(OFFICIAL_DIR, 'config.json'), {});
+  return conf.lastKnownAccountUuid ? `${conf.lastKnownAccountUuid}:${JSON.stringify(conf['oauth:tokenCacheV2'] ?? conf['oauth:tokenCache'] ?? '')}` : null;
+}
+
+// On Windows both instances read the mode from the gateway's Claude-3p dir,
+// and only at startup: it says "1p" just while the official one starts.
+async function startOfficial() {
+  if (!IS_WIN || officialRunning() || getMode() !== '3p') return openOfficial();
+  setMode('1p');
+  try { return await openOfficial(); } finally { setMode('3p'); }
+}
+
+async function official(args) {
+  if (!officialSupported) fail('Running the official Desktop next to the gateway one needs macOS or Windows.');
+  const sub = args.find((a) => !a.startsWith('-')) || 'open';
+  if (sub === 'quit') {
+    console.log(await quitOfficial() ? green('✓ official Claude Desktop quit') + dim('  (still signed in)') : 'official Claude Desktop is not running');
+    return;
+  }
+  if (sub === 'status') {
+    console.log(`Official Claude Desktop: ${officialRunning() ? green('● running') : '○ not running'}  ${officialSession() ? dim('(signed in)') : dim('(not signed in)')}`);
+    return;
+  }
+  if (sub !== 'open') fail(`unknown command: ccgw desktop official ${sub}`);
+
+  if (!IS_WIN) {
+    const conf = readJson(OFFICIAL_3P_CONFIG, {});
+    if (conf.deploymentMode !== '1p') writeJson(OFFICIAL_3P_CONFIG, { ...conf, deploymentMode: '1p' });
+  }
+
+  const before = officialSession();
+  const signIn = args.includes('--sign-in') || !before;
+  if (!signIn || (officialRunning() && !args.includes('--sign-in'))) {
+    if (!(await startOfficial())) fail('could not start the official Claude Desktop');
+    console.log(green('✓ official Claude Desktop open') + dim('  (claude.ai account, next to the gateway one)'));
+    return;
+  }
+
+  // Sign-in finishes through a claude:// link from the browser. macOS hands it
+  // to the gateway Desktop, which drops it, so that one stays closed until
+  // the official one has a new session. Windows starts a new Desktop process
+  // for it, which picks its data dir from the mode: keeping that at "1p" sends
+  // the link to the official instance, with the gateway one left running.
+  const holdMode = IS_WIN && getMode() === '3p';
+  const gatewayWasUp = !IS_WIN && desktopRunning();
+  const reopen = async () => {
+    if (holdMode) setMode('3p');
+    if (gatewayWasUp && !(await openDesktop())) console.log(dim('  (could not reopen the gateway Claude Desktop — start it with `ccgw desktop gateway`)'));
+  };
+  if (gatewayWasUp) {
+    console.log(dim('The browser returns from sign-in to whichever Desktop macOS picks, so the gateway one is closed until you are signed in.'));
+    await quitDesktop();
+  }
+  if (holdMode) setMode('1p');
+  if (!(await (holdMode ? openOfficial() : startOfficial()))) { await reopen(); fail('could not start the official Claude Desktop'); }
+  console.log(`${bold('Sign in')} in the Claude window that just opened ${dim('— waiting (Ctrl+C to stop waiting)')}`);
+
+  let stop = false;
+  const onInt = () => { stop = true; };
+  process.once('SIGINT', onInt);
+  const deadline = Date.now() + 15 * 60_000;
+  while (!stop && Date.now() < deadline) {
+    const now = officialSession();
+    if (now && now !== before) break;
+    await sleep(1000);
+  }
+  process.removeListener('SIGINT', onInt);
+  const done = officialSession() && officialSession() !== before;
+  await reopen();
+  if (done) console.log(green('✓ official Claude Desktop signed in') + dim(gatewayWasUp ? '  — gateway Desktop reopened next to it' : ''));
+  else console.log(dim(`Stopped waiting.${gatewayWasUp ? ' Gateway Desktop reopened.' : ''} Run \`ccgw desktop official --sign-in\` to try again.`));
+}
+
 async function desktop(args) {
   if (!desktopSupported) fail('Claude Desktop is only available on macOS and Windows.');
   const sub = args[0] || 'status';
@@ -716,8 +815,11 @@ async function desktop(args) {
     console.log(getMode() === '3p'
       ? `Claude Desktop: ${cyan('gateway')} mode${profile ? dim(`  (profile: ${profile})`) : ''}`
       : `Claude Desktop: ${cyan('login')} mode ${dim('(claude.ai account)')}`);
+    if (officialSupported && (officialRunning() || officialSession())) await official(['status']);
     return;
   }
+  if (sub === 'official') return official(args.slice(1));
+  if (sub === 'open') return openGateway();
   if (sub === 'login') {
     await withDesktopClosed(() => setMode('1p'));
     console.log(green('✓ Claude Desktop switched to login mode') + dim('  (your claude.ai session is kept)'));
@@ -762,6 +864,9 @@ function help() {
   ccgw desktop toggle          switch to the other mode
   ccgw desktop [status]        show the current mode
   (switching never logs you out: each mode keeps its own session)
+  ccgw desktop open            open the gateway Desktop (starts ccgw; restarts Desktop only if it needs switching)
+  ccgw desktop official        open a second, claude.ai-signed-in Desktop next to the gateway one
+  ccgw desktop official --sign-in | status | quit
 
   ccgw connector add clickup   add a connector to Claude Desktop (sign in via browser)
   ccgw connector add <name> --url <https://…/mcp>   any remote MCP server (OAuth)
@@ -884,6 +989,8 @@ async function menu() {
       ...(cred ? [['Login', `${cred.name}${(() => { const w = statusLine(cred); return w ? dim(` · ${w}`) : ''; })()}  ${loginLeft()}`]] : []),
       ...(desktopSupported ? [
         ['Desktop', mode === 'gateway' ? `${accent('◆')} gateway mode ${dim('(uses Claude Code)')}` : `◇ login mode ${dim('(claude.ai account)')}`],
+        ...(officialSupported && (officialRunning() || officialSession())
+          ? [['Official', `${officialRunning() ? green('● running') : '○ closed'} ${dim(officialSession() ? '· claude.ai, signed in' : '· not signed in')}`]] : []),
         ['Connectors', names.length ? names.slice(0, 4).join(dim(', ')) + (names.length > 4 ? dim(` +${names.length - 4}`) : '') : dim('none')],
         ['Permissions', bypassAll() ? `${accent('bypassed')} ${dim('· tools run without asking')}` : `prompts on ${dim('· Desktop asks before each tool')}`],
       ] : []),
@@ -898,6 +1005,8 @@ async function menu() {
       ...(desktopSupported ? [
         { section: 'Claude Desktop' },
         { label: 'Switch mode…', value: 'desktop', hint: mode === 'gateway' ? 'to claude.ai login' : 'to gateway' },
+        { label: 'Open gateway Desktop', value: 'open-gateway', hint: up ? 'Claude Code' : 'starts the gateway too' },
+        ...(officialSupported ? [{ label: 'Open official Desktop', value: 'official', hint: officialSession() ? 'claude.ai, next to the gateway one' : 'sign in once with claude.ai' }] : []),
         { label: 'Connectors…', value: 'connectors', hint: `${names.length} added` },
         bypassAll()
           ? { label: 'Permission prompts: off', value: 'perms-ask', hint: 'turn back on (restarts Desktop)' }
@@ -920,6 +1029,8 @@ async function menu() {
         case 'info': printInfo(cfg); break;
         case 'cred-login': await credential(['login']); break;
         case 'desktop': await desktopMenu(mode); break;
+        case 'open-gateway': await openGateway(); break;
+        case 'official': await official([]); break;
         case 'connectors': await connectorMenu(); break;
         case 'perms-bypass': await permissions(['bypass']); break;
         case 'perms-ask': await permissions(['ask']); break;
