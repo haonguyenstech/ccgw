@@ -11,7 +11,7 @@ import { gmailLogin, gmailLogout, readGmail, serveGmail, GMAIL_FILE } from '../s
 import { installFigma, serveFigma, figmaStatus, registerPlugin, pluginRegistered, PLUGIN_MANIFEST, RELAY_PORT } from '../src/figma.mjs';
 import { latestVersion, requirements, supportsPlatform, refigmaEntry, entryVersion, probe, findPython, installPython } from '../src/refigma.mjs';
 import { interactive, select, checklist, prompt, panel, accent, screen, lastLines } from '../src/menu.mjs';
-import { syncSupported, officialCookies, claudeAi, gatewayStore, writeSession, removeSession, sessionUntouched, sessionExists, writeSpace, officialSkills, installSkills, installedSkills,
+import { syncSupported, officialCookies, cachedSession, cacheSession, claudeAi, gatewayStore, writeSession, removeSession, sessionUntouched, sessionExists, writeSpace, officialSkills, installSkills, installedSkills,
   gatewaySessions, gatewaySpaces, transcriptMarkdown, chatDocName, gatewayUserSkills, zipSkill, unzipSkill } from '../src/sync.mjs';
 import { logo } from '../src/logo.mjs';
 import { provider, claudeToken, timeLeft, statusLine, loginRunning, openLogin } from '../src/credential.mjs';
@@ -919,7 +919,7 @@ function help() {
   ccgw connector list | remove <name>
   ccgw connector add refigma --official   a local connector (refigma, gmail, figma-local) in the official claude.ai Desktop instead
   ccgw connector list --official | remove <name> --official
-  ccgw sync [--project <name>]… [--all-projects] [--chats] [--skills] [--all] [--since <days>]   copy claude.ai chats, projects and skills from the official Desktop into the gateway one (macOS)
+  ccgw sync [--project <name>]… [--all-projects] [--chats] [--skills] [--all] [--since <days>]   copy claude.ai chats, projects and skills from the official Desktop into the gateway one
   ccgw sync --to-official [same options]   the other way: gateway projects → claude.ai projects, chats as Markdown in their knowledge, your skills uploaded
   ccgw permissions bypass [name]   skip Desktop's "Claude wants to use …" prompts (all connectors, or one)
   ccgw permissions ask [name]      prompt again;  ccgw permissions  shows the current setting
@@ -1226,22 +1226,51 @@ async function officialConnectorMenu() {
 // what changed: a chat updated on claude.ai replaces its gateway copy unless
 // that copy was continued in the gateway, then it comes in as a new one.
 const SYNC_FILE = path.join(HOME_DIR, 'sync.json');
+const SESSION_CACHE = path.join(HOME_DIR, 'official-session.bin');
+
+// claude.ai as the official Desktop. On Windows that Desktop locks its cookie
+// file while open, so the first sync closes it for a moment (it stays signed
+// in) and keeps the sign-in sealed for the next ones.
+async function officialApi() {
+  const cached = IS_WIN ? cachedSession(OFFICIAL_DIR, SESSION_CACHE) : null;
+  if (cached) {
+    const api = claudeAi(cached);
+    if (await api.projects().then(() => true, () => false)) return api;
+  }
+  let jar;
+  try {
+    jar = await officialCookies(OFFICIAL_DIR);
+  } catch (e) {
+    if (e.code !== 'EBUSY') throw e;
+    console.log(dim('The official Desktop locks its sign-in file while open, so it closes for a moment (it stays signed in)…'));
+    await quitOfficial();
+    try {
+      for (let i = 0; ; i++) {
+        try { jar = await officialCookies(OFFICIAL_DIR); break; } catch (err) { if (err.code !== 'EBUSY' || i >= 10) throw err; await sleep(500); }
+      }
+    } finally {
+      if (!(await startOfficial())) console.log(dim('  (could not reopen the official Desktop — ccgw desktop official)'));
+    }
+  }
+  if (IS_WIN) cacheSession(OFFICIAL_DIR, SESSION_CACHE, jar);
+  return claudeAi(jar);
+}
 const OUTSIDE = '__chats__';
 const SKILLS = '__skills__';
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
 async function sync(args) {
-  if (!syncSupported || !officialSupported) fail('ccgw sync needs macOS for now.');
+  if (!syncSupported || !officialSupported) fail('ccgw sync needs macOS or Windows.');
   if (args.includes('--to-official')) return syncToOfficial(args);
   const listOnly = args.includes('--list');
   const since = flag(args, '--since');
   const sinceMs = since ? Date.now() - Number(String(since).replace(/d$/, '')) * 86_400_000 : 0;
   if (since && !Number.isFinite(sinceMs)) fail('--since takes a number of days, e.g. --since 7');
 
-  console.log(dim('Reading claude.ai through the official Desktop’s sign-in (macOS may ask for the "Claude Safe Storage" Keychain item: click Allow)…'));
+  console.log(dim(`Reading claude.ai through the official Desktop’s sign-in${IS_WIN ? '' : ' (macOS may ask for the "Claude Safe Storage" Keychain item: click Allow)'}…`));
   let api, convs, projects;
   try {
-    api = claudeAi(officialCookies(OFFICIAL_DIR));
+    api = await officialApi();
     [convs, projects] = await Promise.all([api.conversations(), api.projects()]);
   } catch (e) {
     fail(e.message);
@@ -1371,10 +1400,10 @@ async function syncToOfficial(args) {
   const sinceMs = since ? Date.now() - Number(String(since).replace(/d$/, '')) * 86_400_000 : 0;
   if (since && !Number.isFinite(sinceMs)) fail('--since takes a number of days, e.g. --since 7');
 
-  console.log(dim('Signing in to claude.ai as the official Desktop (macOS may ask for the "Claude Safe Storage" Keychain item: click Allow)…'));
+  console.log(dim(`Signing in to claude.ai as the official Desktop${IS_WIN ? '' : ' (macOS may ask for the "Claude Safe Storage" Keychain item: click Allow)'}…`));
   let api, remoteProjects;
   try {
-    api = claudeAi(officialCookies(OFFICIAL_DIR));
+    api = await officialApi();
     remoteProjects = await api.projects();
   } catch (e) {
     fail(e.message);

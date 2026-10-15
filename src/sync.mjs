@@ -6,44 +6,74 @@
 // files in a folder, and the skills as one locally uploaded plugin.
 //
 // Reading claude.ai uses the official Desktop's own sign-in cookie, decrypted
-// with the "Claude Safe Storage" Keychain key (macOS asks once). Nothing is
-// written to the official Desktop or the claude.ai account.
+// the way Electron's safeStorage seals it (see below).
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 
-export const syncSupported = process.platform === 'darwin';
+const IS_WIN = process.platform === 'win32';
+export const syncSupported = process.platform === 'darwin' || IS_WIN;
 
 const GATEWAY_ORG = '00000000-0000-4000-8000-000000000001';
 const UPLOADS = 'local-desktop-app-uploads';
 const PLUGIN = 'claude-ai-skills';
 
-// ---------------------------------------------------------------- Electron safeStorage (macOS)
+// ---------------------------------------------------------------- Electron safeStorage
+//
+// macOS: one "Claude Safe Storage" Keychain password for every Claude
+// instance, AES-128-CBC. Windows: each instance has its own AES-256-GCM key in
+// its "Local State", wrapped with DPAPI for the signed-in user.
 
-let aesKey = null;
-function safeStorageKey() {
-  if (aesKey) return aesKey;
+const CBC = !IS_WIN || !!process.env.CCGW_SAFE_STORAGE_PASSWORD; // tests use the macOS scheme anywhere
+let macKey = null;
+function keychainKey() {
+  if (macKey) return macKey;
   let pw = process.env.CCGW_SAFE_STORAGE_PASSWORD; // tests
   if (!pw) try {
     pw = execFileSync('security', ['find-generic-password', '-ws', 'Claude Safe Storage'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch {
     throw new Error('could not read the "Claude Safe Storage" Keychain item (click Allow when macOS asks)');
   }
-  aesKey = crypto.pbkdf2Sync(pw, 'saltysalt', 1003, 16, 'sha1');
-  return aesKey;
+  macKey = crypto.pbkdf2Sync(pw, 'saltysalt', 1003, 16, 'sha1');
+  return macKey;
 }
 
-function decrypt(buf) {
-  if (!['v10', 'v11'].includes(buf.subarray(0, 3).toString())) return buf.toString('utf8');
-  const d = crypto.createDecipheriv('aes-128-cbc', safeStorageKey(), Buffer.alloc(16, ' '));
-  return Buffer.concat([d.update(buf.subarray(3)), d.final()]);
+const winKeys = new Map();
+function localStateKey(userDataDir) {
+  if (winKeys.has(userDataDir)) return winKeys.get(userDataDir);
+  const wrapped = readJson(path.join(userDataDir, 'Local State'), {})?.os_crypt?.encrypted_key;
+  if (!wrapped) throw new Error(`no encryption key in ${path.join(userDataDir, 'Local State')}: open that Claude Desktop once`);
+  const blob = Buffer.from(wrapped, 'base64').subarray(5).toString('base64'); // drop "DPAPI"
+  const out = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+    `Add-Type -AssemblyName System.Security; [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String('${blob}'), $null, 'CurrentUser'))`],
+  { encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  const key = Buffer.from(out, 'base64');
+  winKeys.set(userDataDir, key);
+  return key;
 }
 
-function encrypt(text) {
-  const c = crypto.createCipheriv('aes-128-cbc', safeStorageKey(), Buffer.alloc(16, ' '));
-  return Buffer.concat([Buffer.from('v10'), c.update(text, 'utf8'), c.final()]);
+function decrypt(buf, userDataDir) {
+  if (!['v10', 'v11'].includes(buf.subarray(0, 3).toString())) return buf;
+  if (CBC) {
+    const d = crypto.createDecipheriv('aes-128-cbc', keychainKey(), Buffer.alloc(16, ' '));
+    return Buffer.concat([d.update(buf.subarray(3)), d.final()]);
+  }
+  const d = crypto.createDecipheriv('aes-256-gcm', localStateKey(userDataDir), buf.subarray(3, 15));
+  d.setAuthTag(buf.subarray(buf.length - 16));
+  return Buffer.concat([d.update(buf.subarray(15, buf.length - 16)), d.final()]);
+}
+
+function encrypt(text, userDataDir) {
+  if (CBC) {
+    const c = crypto.createCipheriv('aes-128-cbc', keychainKey(), Buffer.alloc(16, ' '));
+    return Buffer.concat([Buffer.from('v10'), c.update(text, 'utf8'), c.final()]);
+  }
+  const nonce = crypto.randomBytes(12);
+  const c = crypto.createCipheriv('aes-256-gcm', localStateKey(userDataDir), nonce);
+  const body = Buffer.concat([c.update(text, 'utf8'), c.final()]);
+  return Buffer.concat([Buffer.from('v10'), nonce, body, c.getAuthTag()]);
 }
 
 // ---------------------------------------------------------------- claude.ai, as the official Desktop
@@ -54,26 +84,52 @@ const cookieText = (plain) => {
   return /^[\x20-\x7e]+$/.test(s) ? s : plain.subarray(32).toString('utf8');
 };
 
-export function officialCookies(officialDir) {
-  const db = path.join(officialDir, 'Cookies');
-  if (!fs.existsSync(db)) throw new Error('the official Desktop has no sign-in yet (ccgw desktop official)');
+const COOKIE_SQL = "select name, hex(encrypted_value) as v from cookies where host_key in ('.claude.ai','claude.ai') and name in ('sessionKey','lastActiveOrg')";
+
+// Throws with code EBUSY on Windows while the official Desktop runs: it holds
+// its cookie file exclusively there.
+export async function officialCookies(officialDir) {
+  const dir = [path.join(officialDir, 'Network'), officialDir].find((d) => fs.existsSync(path.join(d, 'Cookies')));
+  if (!dir) throw new Error('the official Desktop has no sign-in yet (ccgw desktop official)');
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-cookies-'));
   try {
     for (const f of ['Cookies', 'Cookies-journal', 'Cookies-wal']) {
-      if (fs.existsSync(path.join(officialDir, f))) fs.copyFileSync(path.join(officialDir, f), path.join(tmp, f));
+      if (fs.existsSync(path.join(dir, f))) fs.copyFileSync(path.join(dir, f), path.join(tmp, f));
     }
-    const out = execFileSync('sqlite3', ['-readonly', path.join(tmp, 'Cookies'),
-      "select name, hex(encrypted_value) from cookies where host_key in ('.claude.ai','claude.ai') and name in ('sessionKey','lastActiveOrg')"], { encoding: 'utf8' });
+    let rows;
+    if (IS_WIN) {
+      // node:sqlite still warns that it is experimental; that is noise here.
+      const warn = process.emitWarning;
+      process.emitWarning = (w, ...rest) => (String(w?.message ?? w).includes('SQLite') ? undefined : warn.call(process, w, ...rest));
+      const { DatabaseSync } = await import('node:sqlite').catch(() => { throw new Error('ccgw sync on Windows needs Node 22.5 or later (node:sqlite)'); });
+      const db = new DatabaseSync(path.join(tmp, 'Cookies'), { readOnly: true });
+      rows = db.prepare(COOKIE_SQL).all();
+      db.close();
+    } else {
+      rows = execFileSync('sqlite3', ['-readonly', path.join(tmp, 'Cookies'), COOKIE_SQL], { encoding: 'utf8' })
+        .split('\n').filter(Boolean).map((l) => { const [name, v] = l.split('|'); return { name, v }; });
+    }
     const jar = {};
-    for (const line of out.split('\n').filter(Boolean)) {
-      const [name, hex] = line.split('|');
-      jar[name] = cookieText(decrypt(Buffer.from(hex, 'hex')));
-    }
+    for (const { name, v } of rows) jar[name] = cookieText(decrypt(Buffer.from(v, 'hex'), officialDir));
     if (!jar.sessionKey) throw new Error('the official Desktop is not signed in (ccgw desktop official --sign-in)');
     return jar;
+  } catch (e) {
+    if (e.code === 'EBUSY' || e.code === 'EPERM') throw Object.assign(new Error('the official Desktop holds its sign-in file'), { code: 'EBUSY' });
+    throw e;
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+}
+
+// Windows keeps the sign-in read once, sealed with the official Desktop's own
+// key, so later syncs need not close it again.
+export function cachedSession(officialDir, file) {
+  try { return JSON.parse(decrypt(fs.readFileSync(file), officialDir).toString('utf8')); } catch { return null; }
+}
+
+export function cacheSession(officialDir, file, jar) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, encrypt(JSON.stringify(jar), officialDir), { mode: 0o600 });
 }
 
 export function claudeAi({ sessionKey, lastActiveOrg }) {
@@ -146,7 +202,8 @@ export function zipSkill(dir, name) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-skill-'));
   try {
     fs.cpSync(dir, path.join(tmp, name), { recursive: true });
-    execFileSync('zip', ['-qr', 'skill.zip', name], { cwd: tmp });
+    if (IS_WIN) execFileSync('tar.exe', ['-a', '-cf', 'skill.zip', name], { cwd: tmp, windowsHide: true });
+    else execFileSync('zip', ['-qr', 'skill.zip', name], { cwd: tmp });
     return fs.readFileSync(path.join(tmp, 'skill.zip'));
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
@@ -156,7 +213,10 @@ export function zipSkill(dir, name) {
 export function unzipSkill(zip, into) {
   const file = path.join(into, `.${crypto.randomUUID()}.zip`);
   fs.writeFileSync(file, zip);
-  try { execFileSync('unzip', ['-qo', file, '-d', into]); } finally { fs.rmSync(file, { force: true }); }
+  try {
+    if (IS_WIN) execFileSync('tar.exe', ['-xf', file, '-C', into], { windowsHide: true });
+    else execFileSync('unzip', ['-qo', file, '-d', into]);
+  } finally { fs.rmSync(file, { force: true }); }
 }
 
 // ---------------------------------------------------------------- the gateway Desktop's Cowork store
@@ -174,7 +234,7 @@ export function gatewayStore(desktop3pDir) {
   const skillsDir = path.join(skillsOrg, account, 'skills');
   if (fs.existsSync(skillsDir)) for (const d of fs.readdirSync(skillsDir)) builtinSkills.add(d);
   const conf = (() => { try { return JSON.parse(fs.readFileSync(path.join(desktop3pDir, 'claude_desktop_config.json'), 'utf8')); } catch { return {}; } })();
-  return { base, account, builtinSkills, filesDir: conf.coworkUserFilesPath || path.join(os.homedir(), 'Claude') };
+  return { base, account, builtinSkills, desktopDir: desktop3pDir, filesDir: conf.coworkUserFilesPath || path.join(os.homedir(), 'Claude') };
 }
 
 const readJson = (f, fallback) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return fallback; } };
@@ -240,7 +300,7 @@ export function writeSession(store, conv, { sid = crypto.randomUUID(), space = n
   // Desktop signs its audit log: HMAC-SHA256 chained from a fixed genesis,
   // keyed by 32 random bytes kept base64 in safeStorage.
   const key = crypto.randomBytes(32);
-  fs.writeFileSync(path.join(dir, '.audit-key'), encrypt(key.toString('base64')), { mode: 0o600 });
+  fs.writeFileSync(path.join(dir, '.audit-key'), encrypt(key.toString('base64'), store.desktopDir), { mode: 0o600 });
   let prev = 'audit-chain-genesis';
   const audit = [];
   const sign = (rec) => {
@@ -280,7 +340,7 @@ export function writeSession(store, conv, { sid = crypto.randomUUID(), space = n
   const meta = {
     ...rest,
     sessionId: `local_${sid}`, processName: name, vmProcessName: name, cliSessionId: cli,
-    cwd: `${store.base}/`, createdAt: ms(conv.created_at), lastActivityAt: ms(conv.updated_at),
+    cwd: store.base + path.sep, createdAt: ms(conv.created_at), lastActivityAt: ms(conv.updated_at),
     title: conv.name || 'Chat from claude.ai', initialMessage: chain.length ? messageText(chain[0]).slice(0, 2000) : '',
     isArchived: false, userSelectedFolders: space ? [space.folder] : [], resolvedFolderKinds: space ? [{ display: space.folder, kind: 'local' }] : [],
     ...(space && { spaceId: space.id, spaceIdSetBy: 'user' }),
