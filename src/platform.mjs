@@ -112,8 +112,21 @@ export function officialDir() {
 }
 
 // Main Desktop processes, tagged with whether they are the official instance.
+// On Windows each listing is a PowerShell run (1-3 s) and a menu redraw or a
+// wait loop asks several times in a row, so a listing is reused for a second;
+// anything that starts or stops Desktop drops it.
+let procCache = null;
+const fresh = () => { procCache = null; };
+
 function desktopProcs() {
   if (FAKE_DESKTOP) return [];
+  if (IS_WIN && procCache && Date.now() - procCache.at < 1000) return procCache.list;
+  const list = listProcs();
+  if (IS_WIN) procCache = { at: Date.now(), list };
+  return list;
+}
+
+function listProcs() {
   try {
     if (IS_MAC) {
       const pids = run('pgrep', ['-x', 'Claude']).split(/\s+/).filter(Boolean);
@@ -155,10 +168,20 @@ function activate(pid) {
   } catch {}
 }
 
-const signal = (pids, sig) => { for (const pid of pids) { try { process.kill(Number(pid), sig); } catch {} } };
+const signal = (pids, sig) => { for (const pid of pids) { try { process.kill(Number(pid), sig); } catch {} } fresh(); };
 // Windows has no graceful signal for a GUI app; /T takes the instance's own
 // renderers and helpers with it and nothing else.
-const killTree = (pids) => { for (const pid of pids) { try { run('taskkill.exe', ['/PID', String(pid), '/T', '/F']); } catch {} } };
+const killTree = (pids) => { for (const pid of pids) { try { run('taskkill.exe', ['/PID', String(pid), '/T', '/F']); } catch {} } fresh(); };
+
+// Polls by the clock, not by count: a check can itself take seconds.
+async function until(cond, ms, step = 300) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (cond()) return true;
+    await sleep(step);
+  }
+  return cond();
+}
 
 // Desktop's quit runs cleanup (Cowork VM, MCP servers) that can take a while;
 // wait for it to be fully gone, or a relaunch lands on the dying instance.
@@ -173,13 +196,15 @@ export async function quitDesktop() {
     // Closing the window only hides Desktop to the tray on Windows.
     else if (IS_WIN) ps(`${WIN_DESKTOP_FILTER} | Stop-Process -Force`);
   } catch {}
-  for (let i = 0; i < 150 && desktopRunning(); i++) await sleep(200);
+  fresh();
+  await until(() => !desktopRunning(), 30_000, 200);
   if (desktopRunning()) {
     try {
       if (byPid) IS_WIN ? killTree(desktopPids()) : signal(desktopPids(), 'SIGKILL');
       else IS_MAC ? run('pkill', ['-x', 'Claude']) : ps(`${WIN_DESKTOP_FILTER} | Stop-Process -Force`);
     } catch {}
-    for (let i = 0; i < 25 && desktopRunning(); i++) await sleep(200);
+    fresh();
+    await until(() => !desktopRunning(), 5000, 200);
   }
   return true;
 }
@@ -222,12 +247,11 @@ export async function openDesktop() {
   const pids = IS_WIN ? () => desktopProcs().map((p) => p.pid) : desktopPids;
   const old = new Set(pids());
   const started = () => pids().some((p) => !old.has(p));
-  for (let i = 0; i < 10; i++) {
+  // Windows is slow to list processes, so it launches less often and waits longer.
+  for (let i = 0; i < (IS_WIN ? 3 : 10); i++) {
     try { launchDesktop(); } catch {}
-    for (let j = 0; j < 10; j++) {
-      await sleep(300);
-      if (started()) return true;
-    }
+    fresh();
+    if (await until(started, IS_WIN ? 10_000 : 3000)) return true;
   }
   return false;
 }
@@ -240,18 +264,15 @@ export async function openOfficial() {
   const [running] = officialPids();
   if (running) { activate(running); return true; }
   try { launchOfficial(); } catch { return false; }
-  for (let i = 0; i < 100; i++) {
-    await sleep(300);
-    if (officialRunning()) return true;
-  }
-  return false;
+  fresh();
+  return until(officialRunning, 30_000);
 }
 
 export async function quitOfficial() {
   if (!officialRunning()) return false;
   if (IS_WIN) killTree(officialPids());
   else signal(officialPids(), 'SIGTERM');
-  for (let i = 0; i < 150 && officialRunning(); i++) await sleep(200);
+  await until(() => !officialRunning(), 30_000, 200);
   if (officialRunning()) IS_WIN ? killTree(officialPids()) : signal(officialPids(), 'SIGKILL');
   return true;
 }

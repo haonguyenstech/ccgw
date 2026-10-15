@@ -76,7 +76,9 @@ function rotateLog() {
   } catch {}
 }
 
-async function start(args = []) {
+// soft: a missing Claude Code login is a warning, not an error. Desktop can
+// open on the gateway before anyone signs in; replies need the login.
+async function start(args = [], { soft = false, quiet = false } = {}) {
   const cfg = readConfig();
   const portArg = args.indexOf('--port');
   if (portArg >= 0) {
@@ -87,20 +89,27 @@ async function start(args = []) {
   }
 
   if (await health(cfg)) {
-    console.log(green('● ccgw is already running'));
-    printInfo(cfg);
+    console.log(green('● ccgw is already running') + (quiet ? dim(`  ${baseUrl(cfg)}`) : ''));
+    if (!quiet) printInfo(cfg);
     return true;
   }
 
   const claudePath = findClaude(cfg.claudePath);
   let auth = null;
   if (!process.env.CCGW_SKIP_AUTH_CHECK) {
-    if (!claudePath) fail('Claude Code CLI not found. Install it (https://claude.com/claude-code), run `claude` and log in, then retry.');
-    auth = claudeAuthStatus(claudePath);
-    const cred = provider(cfg);
-    if (!auth?.loggedIn) fail(cred
-      ? `Claude Code CLI is not logged in. Sign in with ${cred.name}: ccgw credential login`
-      : 'Claude Code CLI is not logged in. Run `claude` and /login first.');
+    const warn = (msg) => {
+      if (!soft) fail(msg);
+      console.log(`${accent('!')} ${msg.replace(/ first\.$|, then retry\.$/, '.')} ${dim('Desktop opens anyway; replies need it (then `ccgw restart`).')}`);
+    };
+    if (!claudePath) warn('Claude Code CLI not found. Install it (https://claude.com/claude-code), run `claude` and log in, then retry.');
+    else {
+      auth = claudeAuthStatus(claudePath);
+      const cred = provider(cfg);
+      if (!auth?.loggedIn) warn(cred
+        ? `Claude Code CLI is not logged in. Sign in with ${cred.name}: ccgw credential login`
+        : 'Claude Code CLI is not logged in. Run `claude` and /login first.');
+      if (!auth?.loggedIn) auth = null;
+    }
   }
 
   if (args.includes('--foreground') || args.includes('-f')) {
@@ -121,9 +130,9 @@ async function start(args = []) {
   for (let i = 0; i < 60; i++) {
     await sleep(250);
     if (await health(cfg, 500)) {
-      const who = auth ? `Claude Code: ${auth.email || auth.authMethod}` : 'auth check skipped';
+      const who = auth ? `Claude Code: ${auth.email || auth.authMethod}` : process.env.CCGW_SKIP_AUTH_CHECK ? 'auth check skipped' : 'not logged in';
       console.log(green('● ccgw started') + dim(`  (pid ${child.pid}, ${who})`));
-      printInfo(cfg, { copied: !process.env.CCGW_NO_CLIPBOARD && copyToClipboard(cfg.apiKey) });
+      if (!quiet) printInfo(cfg, { copied: !process.env.CCGW_NO_CLIPBOARD && copyToClipboard(cfg.apiKey) });
       return true;
     }
     if (!readPid()) break;
@@ -712,7 +721,8 @@ async function withDesktopClosed(fn) {
 // and key is just started or brought forward; otherwise it is switched over
 // (which restarts it).
 async function openGateway() {
-  await start([]);
+  console.log(dim('Opening the gateway Claude Desktop…'));
+  await start([], { soft: true, quiet: true });
   const cfg = readConfig();
   const meta = readJson(META_FILE, { entries: [] });
   const applied = meta.entries?.find((e) => e.id === meta.appliedId);
@@ -765,6 +775,7 @@ async function official(args) {
 
   const before = officialSession();
   const signIn = args.includes('--sign-in') || !before;
+  console.log(dim(officialRunning() ? 'Bringing the official Claude Desktop forward…' : 'Opening the official Claude Desktop…'));
   if (!signIn || (officialRunning() && !args.includes('--sign-in'))) {
     if (!(await startOfficial())) fail('could not start the official Claude Desktop');
     console.log(green('✓ official Claude Desktop open') + dim('  (claude.ai account, next to the gateway one)'));
@@ -826,7 +837,7 @@ async function desktop(args) {
     return;
   }
   if (sub === 'gateway') {
-    await start([]);
+    await start([], { soft: true });
     await withDesktopClosed(() => { writeProfile(); setMode('3p'); });
     console.log(green('✓ Claude Desktop switched to gateway mode') + dim(`  (profile: ${PROFILE_NAME})`));
     return;
