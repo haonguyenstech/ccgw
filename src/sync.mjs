@@ -82,31 +82,81 @@ export function claudeAi({ sessionKey, lastActiveOrg }) {
     cookie: `sessionKey=${sessionKey}`, 'anthropic-client-platform': 'web_claude_ai', accept: 'application/json',
     'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Claude/1.0 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36',
   };
-  const get = async (p) => {
+  // Resolves to the parsed body (null when empty), or throws with claude.ai's error code.
+  const call = async (method, p, body, { raw = false } = {}) => {
     for (let attempt = 0; ; attempt++) {
-      const r = await fetch(`https://claude.ai/api/${p}`, { headers });
-      if (r.ok) return r.json();
-      if (r.status === 401 || r.status === 403) throw new Error(`claude.ai refused the official Desktop's sign-in (HTTP ${r.status}); open it once (ccgw desktop official) and try again`);
-      if (attempt >= 2 || r.status < 429) throw new Error(`claude.ai ${p.split('?')[0]}: HTTP ${r.status}`);
+      const json = body !== undefined && !(body instanceof FormData);
+      const r = await fetch(`https://claude.ai/api/${p}`, {
+        method, body: json ? JSON.stringify(body) : body,
+        headers: json ? { ...headers, 'content-type': 'application/json' } : headers,
+      });
+      if (r.ok) {
+        if (raw) return Buffer.from(await r.arrayBuffer());
+        const text = await r.text();
+        return text ? JSON.parse(text) : null;
+      }
+      const err = await r.json().catch(() => null);
+      if (r.status === 401 || (r.status === 403 && !err?.error)) throw new Error(`claude.ai refused the official Desktop's sign-in (HTTP ${r.status}); open it once (ccgw desktop official) and try again`);
+      if (attempt >= 2 || (r.status < 429 && r.status !== 409)) {
+        throw Object.assign(new Error(`claude.ai ${method} ${p.split('?')[0]}: ${err?.error?.message || `HTTP ${r.status}`}`), { code: err?.error?.details?.error_code, status: r.status });
+      }
       await new Promise((res) => setTimeout(res, 1500 * (attempt + 1)));
     }
   };
+  const get = (p) => call('GET', p);
   let org = lastActiveOrg;
   const orgId = async () => org || (org = (await get('organizations')).find((o) => o.capabilities?.includes('chat'))?.uuid);
+  const o = async (p) => `organizations/${await orgId()}/${p}`;
   return {
     async conversations() {
       const all = [];
       for (let offset = 0; ; offset += 100) {
-        const page = await get(`organizations/${await orgId()}/chat_conversations?limit=100&offset=${offset}`);
+        const page = await get(await o(`chat_conversations?limit=100&offset=${offset}`));
         all.push(...page);
         if (page.length < 100) return all;
       }
     },
-    conversation: async (id) => get(`organizations/${await orgId()}/chat_conversations/${id}?tree=True&rendering_mode=messages&render_all_tools=true`),
-    projects: async () => (await get(`organizations/${await orgId()}/projects?limit=200`)).filter((p) => !p.archived_at),
-    project: async (id) => get(`organizations/${await orgId()}/projects/${id}`),
-    docs: async (id) => get(`organizations/${await orgId()}/projects/${id}/docs`),
+    conversation: async (id) => get(await o(`chat_conversations/${id}?tree=True&rendering_mode=messages&render_all_tools=true`)),
+    projects: async () => (await get(await o('projects?limit=200'))).filter((p) => !p.archived_at),
+    project: async (id) => get(await o(`projects/${id}`)),
+    docs: async (id) => get(await o(`projects/${id}/docs`)),
+    createProject: async (name, description = '') => call('POST', await o('projects'), { name, description, is_private: true }),
+    setInstructions: async (id, prompt) => call('PUT', await o(`projects/${id}`), { prompt_template: prompt }),
+    addDoc: async (id, fileName, content) => call('POST', await o(`projects/${id}/docs`), { file_name: fileName, content }),
+    deleteDoc: async (id, doc) => call('DELETE', await o(`projects/${id}/docs/${doc}`)).catch((e) => { if (e.status !== 404) throw e; }),
+    skills: async () => (await get(await o('skills/list-skills?include_wiggle_skills=true&entrypoint=local-agent'))).skills || [],
+    downloadSkill: async (id) => call('GET', await o(`skills/download-dot-skill-file?skill_id=${encodeURIComponent(id)}&entrypoint=local-agent`), undefined, { raw: true }),
+    // "added", or "exists" when the account already has a skill of that name.
+    async uploadSkill(name, zip) {
+      const form = new FormData();
+      form.append('file', new Blob([zip], { type: 'application/zip' }), `${name}.skill`);
+      try {
+        await call('POST', await o(`skills/upload-skill?overwrite=false&check_skill_name=${encodeURIComponent(name)}`), form);
+        return 'added';
+      } catch (e) {
+        if (/already_exists|name_taken|name_reserved/.test(e.code || '')) return 'exists';
+        throw e;
+      }
+    },
   };
+}
+
+// A skill folder <name>/… as the .skill zip claude.ai takes, and back.
+export function zipSkill(dir, name) {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-skill-'));
+  try {
+    fs.cpSync(dir, path.join(tmp, name), { recursive: true });
+    execFileSync('zip', ['-qr', 'skill.zip', name], { cwd: tmp });
+    return fs.readFileSync(path.join(tmp, 'skill.zip'));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+export function unzipSkill(zip, into) {
+  const file = path.join(into, `.${crypto.randomUUID()}.zip`);
+  fs.writeFileSync(file, zip);
+  try { execFileSync('unzip', ['-qo', file, '-d', into]); } finally { fs.rmSync(file, { force: true }); }
 }
 
 // ---------------------------------------------------------------- the gateway Desktop's Cowork store
@@ -325,4 +375,82 @@ export function installSkills(store, skills, version) {
   settings.enabledPlugins = { ...settings.enabledPlugins, [id]: true };
   writeJson(sfile, settings);
   return plugin;
+}
+
+// ---------------------------------------------------------------- gateway → claude.ai
+
+// The gateway's Cowork tasks, newest first; `size` (its audit log's) tells a
+// task that moved on since the last sync.
+export function gatewaySessions(store) {
+  const out = [];
+  for (const f of fs.readdirSync(store.base)) {
+    if (!/^local_[0-9a-f-]{36}\.json$/.test(f)) continue;
+    const meta = readJson(path.join(store.base, f), null);
+    if (!meta || meta.isArchived) continue;
+    const dir = path.join(store.base, f.slice(6, 14));
+    let size = 0;
+    try { size = fs.statSync(path.join(dir, 'audit.jsonl')).size; } catch {}
+    out.push({ session: meta.sessionId, title: meta.title || 'Untitled task', spaceId: meta.spaceId || null, cli: meta.cliSessionId, dir, size, createdAt: meta.createdAt, lastActivityAt: meta.lastActivityAt || meta.createdAt });
+  }
+  return out.sort((a, b) => b.lastActivityAt - a.lastActivityAt);
+}
+
+export const gatewaySpaces = (store) => readJson(path.join(store.base, 'spaces.json'), { spaces: [] }).spaces;
+
+// A task as Markdown: what was said, with tool calls named but their output
+// and the model's thinking left out.
+export function transcriptMarkdown(s) {
+  const root = path.join(s.dir, '.claude', 'projects');
+  let file = null;
+  if (fs.existsSync(root)) {
+    for (const d of fs.readdirSync(root)) {
+      const f = path.join(root, d, `${s.cli}.jsonl`);
+      if (fs.existsSync(f)) { file = f; break; }
+    }
+  }
+  const turns = [];
+  const add = (who, text) => {
+    const last = turns.at(-1);
+    if (last?.who === who) last.parts.push(text);
+    else turns.push({ who, parts: [text] });
+  };
+  for (const line of file ? fs.readFileSync(file, 'utf8').split('\n') : []) {
+    let e;
+    try { e = JSON.parse(line); } catch { continue; }
+    if (e.isMeta || e.isSidechain || e.isCompactSummary || !e.message) continue;
+    const c = e.message.content;
+    if (e.type === 'user') {
+      const text = typeof c === 'string' ? c : (c || []).filter((b) => b.type === 'text').map((b) => b.text).join('\n');
+      if (text.trim()) add('You', text.trim());
+    } else if (e.type === 'assistant') {
+      for (const b of Array.isArray(c) ? c : []) {
+        if (b.type === 'text' && b.text.trim()) add('Claude', b.text.trim());
+        else if (b.type === 'tool_use') add('Claude', `_[used ${b.name.replace(/^mcp__[^_]+__/, '')}]_`);
+      }
+    }
+  }
+  const when = (t) => new Date(t).toISOString().slice(0, 16).replace('T', ' ');
+  return [
+    `# ${s.title}`, '',
+    `_Chat from the gateway Claude Desktop (Claude Code), ${when(s.createdAt)} – ${when(s.lastActivityAt)} UTC, copied by ccgw sync. Tool output and thinking are left out._`, '',
+    ...turns.flatMap((t) => [`## ${t.who}`, '', t.parts.join('\n\n'), '']),
+  ].join('\n');
+}
+
+export const chatDocName = (s) => `Chat - ${safeName(s.title).slice(0, 60)} (${s.session.slice(6, 14)}).md`;
+
+// Skills the user added to the gateway Desktop (uploaded plugins), not the
+// ones ccgw copied from claude.ai.
+export function gatewayUserSkills(store) {
+  const inst = readJson(path.join(store.base, 'cowork_plugins', 'installed_plugins.json'), { plugins: {} });
+  const out = [];
+  for (const [id, entries] of Object.entries(inst.plugins || {})) {
+    if (!id.endsWith(`@${UPLOADS}`) || id === `${PLUGIN}@${UPLOADS}`) continue;
+    const dir = path.join(entries.find((e) => e.scope === 'user')?.installPath || '', 'skills');
+    if (!fs.existsSync(dir)) continue;
+    for (const name of fs.readdirSync(dir)) {
+      if (fs.existsSync(path.join(dir, name, 'SKILL.md'))) out.push({ name, dir: path.join(dir, name) });
+    }
+  }
+  return out;
 }

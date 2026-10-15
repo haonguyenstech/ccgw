@@ -199,8 +199,15 @@ ccgw sync --list                       # what there is, and how much is new
 
 - **Projects** become gateway projects of the same name. Their instructions and knowledge files go in `~/Claude/Projects/<name>`, the project's folder, and their chats sit inside them.
 - **Chats** become Cowork tasks you can open and continue. They come over as text: images and PDFs stay on claude.ai, and only the branch claude.ai shows is copied.
-- **Skills** the gateway Desktop lacks (skill-creator, deep-research, …) are installed as one local plugin, `claude-ai-skills`.
+- **Skills** on the account that the gateway Desktop lacks (skill-creator, mcp-builder, deep-research, …, enabled or not) are installed as one local plugin, `claude-ai-skills`.
 - Running it again only brings what changed. A chat updated on claude.ai replaces its gateway copy, unless you continued that copy in the gateway; then the new version comes in next to it.
+
+**The other way**, `ccgw sync --to-official` (*Sync to official…*), takes the same options:
+
+- **Gateway projects** become claude.ai projects (a project that came from claude.ai goes back to that one), with `Project instructions.md` from the project's folder as their instructions.
+- **Chats** go in as Markdown transcripts in the project's knowledge (`Chat - <title> (<id>).md`); ones outside a project go to a claude.ai project named *Gateway chats*. claude.ai cannot take in a chat's history, so this is the way to pick one up there: open the project and ask Claude to continue from the file. A chat that moved on replaces its file on the next run.
+- **Skills you added** to the gateway Desktop are uploaded to your personal skills; one the account already has is left alone.
+- Nothing that came from claude.ai is sent back.
 
 It reads claude.ai with the official Desktop's own sign-in (macOS asks once for the *Claude Safe Storage* Keychain item) and never writes to the official Desktop or your account. The gateway Desktop restarts to load what was copied (`--no-restart` skips that).
 

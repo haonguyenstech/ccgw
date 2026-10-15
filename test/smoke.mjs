@@ -184,6 +184,21 @@ try {
       && store.builtinSkills.has('docx'));
     S.removeSession(store, rec.session);
     check('sync removes a session', !fs.existsSync(sdir) && !fs.existsSync(path.join(store.base, `${rec.session}.json`)));
+    // --to-official: a gateway task read back as a Markdown transcript, without tool output or thinking.
+    const back = S.writeSession(store, conv, { space });
+    const listed = S.gatewaySessions(store).find((x) => x.session === back.session);
+    const md = S.transcriptMarkdown(listed);
+    check('to-official lists gateway tasks', listed?.title === 'What is today' && listed.spaceId === space.id && listed.size === back.auditSize);
+    check('to-official transcript', md.startsWith('# What is today') && md.includes('## You\n\nwhat is today') && md.includes('## Claude\n\nThursday.') && !md.includes('edited-away'));
+    check('to-official doc name', S.chatDocName(listed) === `Chat - What is today (${back.session.slice(6, 14)}).md`);
+    const up = path.join(store.base, 'cowork_plugins', 'marketplaces', 'local-desktop-app-uploads', 'my-plugin');
+    fs.mkdirSync(path.join(up, 'skills', 'mine'), { recursive: true });
+    fs.writeFileSync(path.join(up, 'skills', 'mine', 'SKILL.md'), '---\nname: mine\n---\n');
+    const ifile = path.join(store.base, 'cowork_plugins', 'installed_plugins.json');
+    const inst2 = JSON.parse(fs.readFileSync(ifile, 'utf8'));
+    inst2.plugins['my-plugin@local-desktop-app-uploads'] = [{ scope: 'user', installPath: up }];
+    fs.writeFileSync(ifile, JSON.stringify(inst2));
+    check('to-official finds the user\'s skills, not the copied ones', JSON.stringify(S.gatewayUserSkills(store).map((x) => x.name)) === '["mine"]');
   }
 
   {
