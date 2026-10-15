@@ -114,6 +114,19 @@ try {
       ccgw('connector', 'remove', 'notion', '--no-restart');
       ccgw('connector', 'remove', 'acme', '--no-restart');
       check('connector remove', !ccgw('connector', 'list').includes('acme'));
+      // --official writes the official Desktop's own mcpServers, never the gateway profile.
+      const offCfg = path.join(desktopDir, 'official', 'Claude-Official', 'claude_desktop_config.json');
+      fs.mkdirSync(path.dirname(offCfg), { recursive: true });
+      fs.writeFileSync(offCfg, JSON.stringify({ preferences: { keep: 1 } }));
+      const gatewayBefore = ccgw('connector', 'list');
+      check('connector add --official', ccgw('connector', 'add', 'gmail', '--official', '--no-restart').includes('official Claude Desktop'));
+      const offGmail = () => JSON.parse(fs.readFileSync(offCfg, 'utf8'));
+      check('official entry is plain stdio', offGmail().preferences?.keep === 1 && offGmail().mcpServers?.gmail?.command === gmail.command && !('transport' in offGmail().mcpServers.gmail) && !('name' in offGmail().mcpServers.gmail), JSON.stringify(offGmail().mcpServers));
+      check('official add leaves the gateway alone', ccgw('connector', 'list') === gatewayBefore);
+      check('connector list --official', ccgw('connector', 'list', '--official').includes('gmail'));
+      check('--official refuses remote connectors', (() => { try { ccgw('connector', 'add', 'clickup', '--official', '--no-restart'); return false; } catch (e) { return String(e.stderr).includes('Settings → Connectors'); } })());
+      ccgw('connector', 'remove', 'gmail', '--official', '--no-restart');
+      check('connector remove --official', !offGmail().mcpServers.gmail && offGmail().preferences?.keep === 1 && ccgw('connector', 'list') === gatewayBefore);
     }
   }
 

@@ -546,6 +546,7 @@ const bypassAll = () => !!readConfig().bypassPermissions;
 const bypassed = (c) => c.toolPolicy?.['*'] === 'allow';
 
 async function applyConnectors(list, args) {
+  if (args.includes('--official')) return applyOfficialConnectors(list, args);
   if (bypassAll()) list = list.map((c) => ({ ...c, toolPolicy: ALLOW_ALL }));
   const restart = !args.includes('--no-restart');
   const write = () => writeProfile({ managedMcpServers: list });
@@ -554,13 +555,44 @@ async function applyConnectors(list, args) {
   return restart;
 }
 
+// --official targets the claude.ai Desktop instead: local servers go in the
+// mcpServers of its own config, so they never reach the gateway profile.
+// Remote ones belong to the claude.ai account (its Settings → Connectors).
+const OFFICIAL_CONFIG = path.join(officialDir(), 'claude_desktop_config.json');
+const officialConnectors = () => Object.entries(readJson(OFFICIAL_CONFIG, {}).mcpServers || {}).map(([name, s]) => ({ name, ...s }));
+
+// Desktop rewrites its config on quit, so a running official Desktop is closed
+// for the write and opened again; quitting it keeps it signed in.
+async function applyOfficialConnectors(list, args) {
+  const mcpServers = Object.fromEntries(list.map(({ name, transport, toolPolicy, ...rest }) => [name, rest]));
+  const write = () => writeJson(OFFICIAL_CONFIG, { ...readJson(OFFICIAL_CONFIG, {}), mcpServers });
+  if (args.includes('--no-restart') || !officialRunning()) { write(); return false; }
+  await quitOfficial();
+  write();
+  if (!(await startOfficial())) console.log(dim('  (could not reopen the official Claude Desktop — start it with `ccgw desktop official`)'));
+  return true;
+}
+
+const desktopName = (args) => (args.includes('--official') ? 'the official Claude Desktop' : 'Claude Desktop');
+const loaded = (restarted, args) => restarted
+  ? `  ${desktopName(args).replace(/^the o/, 'O')} restarted`
+  : `  ${args.includes('--official') && !officialRunning() ? `Loads next time you open ${desktopName(args)}` : `Restart ${desktopName(args)} to load it`}`;
+const modeNote = (args) => {
+  if (!args.includes('--official') && getMode() !== '3p') console.log(dim('  Note: Desktop is in login mode; connectors apply in gateway mode (ccgw desktop gateway).'));
+};
+
 async function connector(args) {
   if (!desktopSupported) fail('Claude Desktop is only available on macOS and Windows.');
+  const off = args.includes('--official');
+  if (off && !officialSupported) fail('The official Desktop next to the gateway one needs macOS or Windows.');
+  args = args.filter((a) => a !== '--official');
+  if (off) args.push('--official');
   const [sub = 'list', name] = args;
-  const list = connectors();
+  const list = off ? officialConnectors() : connectors();
 
   if (sub === 'list') {
-    if (!list.length) console.log(dim('No connectors. Add one with: ccgw connector add clickup'));
+    if (off) console.log(dim(`Official Claude Desktop (${OFFICIAL_CONFIG}):`));
+    if (!list.length) console.log(dim(off ? '  No local connectors. Add one with: ccgw connector add refigma --official' : 'No connectors. Add one with: ccgw connector add clickup'));
     for (const c of list) console.log(`  ${cyan(c.name.padEnd(12))} ${c.url || [c.command, ...(c.args || [])].join(' ')} ${dim(c.oauth ? '(OAuth)' : c.transport === 'stdio' ? '(local)' : '')}${bypassed(c) ? ' ' + green('no prompts') : ''}`);
     console.log(dim(`\n  presets: ${Object.keys(CONNECTOR_PRESETS).join(', ')}`));
     return;
@@ -569,16 +601,17 @@ async function connector(args) {
   if (sub === 'add') {
     if (!name) fail('usage: ccgw connector add <preset> | ccgw connector add <name> --url <https://…/mcp> [--header "K: V"] [--no-oauth]');
     const preset = CONNECTOR_PRESETS[name.toLowerCase()];
+    if (off && (!preset?.local || flag(args, '--url'))) fail(`the official Desktop takes remote connectors from your claude.ai account: add "${name}" in its Settings → Connectors. --official works for the local ones: ${Object.keys(CONNECTOR_PRESETS).filter((k) => CONNECTOR_PRESETS[k].local).join(', ')}`);
     if (preset?.local === 'refigma' && !flag(args, '--url')) return addRefigma(name.toLowerCase(), preset, list, args);
     if (preset?.local && !flag(args, '--url')) {
       const id = name.toLowerCase();
       const figmaResult = preset.local === 'figma' ? await setupFigma(args) : null;
       const detail = preset.local === 'gmail' ? await ensureGmail(args) : 'Figma Desktop plugin';
       const restarted = await applyConnectors([...list.filter((c) => c.name !== id), keepPolicy(localEntry(id, preset.local), list, args)], args);
-      console.log(green(`✓ connector "${id}" added`) + dim(`  (${detail}, runs locally via ccgw)`));
-      console.log(dim(restarted ? '  Claude Desktop restarted' : '  Restart Claude Desktop to load it') + dim(` — no Connect step needed; ask e.g. "${preset.example}"`));
+      console.log(green(`✓ connector "${id}" added`) + dim(`  (${detail}, runs locally via ccgw${args.includes('--official') ? ', official Claude Desktop' : ''})`));
+      console.log(dim(loaded(restarted, args)) + dim(` — no Connect step needed; ask e.g. "${preset.example}"`));
       if (figmaResult) console.log(`\n  ${figmaNextSteps(figmaResult)}\n`);
-      if (getMode() !== '3p') console.log(dim('  Note: Desktop is in login mode; connectors apply in gateway mode (ccgw desktop gateway).'));
+      modeNote(args);
       return;
     }
     const url = flag(args, '--url') || preset?.url;
@@ -602,14 +635,14 @@ async function connector(args) {
     const restarted = await applyConnectors(next, args);
     console.log(green(`✓ connector "${entry.name}" added`) + dim(`  (${url})`));
     console.log(entry.oauth ? connectGuide(preset?.label || entry.name, restarted, preset?.example) : dim(restarted ? '  Claude Desktop restarted.' : '  Restart Claude Desktop to load it.'));
-    if (getMode() !== '3p') console.log(dim('  Note: Desktop is in login mode; connectors apply in gateway mode (ccgw desktop gateway).'));
+    modeNote(args);
     return;
   }
 
   if (sub === 'remove' || sub === 'rm') {
-    if (!list.some((c) => c.name === name)) fail(`no connector named "${name}"`);
+    if (!list.some((c) => c.name === name)) fail(`no connector named "${name}"${off ? ' in the official Desktop' : ''}`);
     await applyConnectors(list.filter((c) => c.name !== name), args);
-    console.log(green(`✓ connector "${name}" removed`));
+    console.log(green(`✓ connector "${name}" removed`) + dim(off ? '  (official Claude Desktop)' : ''));
     return;
   }
   fail(`unknown command: ccgw connector ${sub}`);
@@ -636,12 +669,12 @@ async function addRefigma(id, preset, list, args) {
 
   const restarted = await applyConnectors([...list.filter((c) => c.name !== id), keepPolicy(entry, list, args)], args);
   const what = dir ? dir : before && before !== version ? `v${before} → v${version}` : `v${version}`;
-  console.log(green(`✓ connector "${id}" added`) + dim(`  (refigma-mcp ${what}, runs locally)`));
-  console.log(dim(restarted ? '  Claude Desktop restarted' : '  Restart Claude Desktop to load it') + dim(` — no Connect step needed; ask e.g. "${preset.example}"`));
+  console.log(green(`✓ connector "${id}" added`) + dim(`  (refigma-mcp ${what}, runs locally${args.includes('--official') ? ', official Claude Desktop' : ''})`));
+  console.log(dim(loaded(restarted, args)) + dim(` — no Connect step needed; ask e.g. "${preset.example}"`));
   console.log(dim(IS_WIN
     ? '  First use: Claude runs figma_relogin, which opens an Edge window at figma.com/login — sign in there once.'
     : '  It signs in with your Edge figma.com session: the first call asks for the Keychain once — click Allow.'));
-  if (getMode() !== '3p') console.log(dim('  Note: Desktop is in login mode; connectors apply in gateway mode (ccgw desktop gateway).'));
+  modeNote(args);
 }
 
 // Windows: refigma needs Python 3. Found even when it is not on PATH; otherwise installed
@@ -882,6 +915,8 @@ function help() {
   ccgw connector add clickup   add a connector to Claude Desktop (sign in via browser)
   ccgw connector add <name> --url <https://…/mcp>   any remote MCP server (OAuth)
   ccgw connector list | remove <name>
+  ccgw connector add refigma --official   a local connector (refigma, gmail, figma-local) in the official claude.ai Desktop instead
+  ccgw connector list --official | remove <name> --official
   ccgw permissions bypass [name]   skip Desktop's "Claude wants to use …" prompts (all connectors, or one)
   ccgw permissions ask [name]      prompt again;  ccgw permissions  shows the current setting
   ccgw connector add gmail --client-json <file>   Gmail via your Google OAuth client (runs locally)
@@ -1104,6 +1139,7 @@ async function connectorMenu() {
     { section: 'Runs on this machine' },
     ...presets.filter(([, p]) => p.local).map(preset),
     { section: 'Manage' },
+    ...(officialSupported ? [{ label: 'Official Desktop (claude.ai)…', value: 'official', hint: dim('local connectors for the signed-in app') }] : []),
     { label: 'Remove a connector…', value: 'remove', disabled: !added.length },
     { label: 'List connectors', value: 'list' },
     { label: 'Back', value: null },
@@ -1124,6 +1160,7 @@ async function connectorMenu() {
     return connector(['add', id]);
   }
   if (choice === 'list') return connector(['list']);
+  if (choice === 'official') return officialConnectorMenu();
   if (choice === 'custom') {
     const url = await prompt('MCP server URL:', { placeholder: '(https://…/mcp)' });
     if (!url) return;
@@ -1139,6 +1176,36 @@ async function connectorMenu() {
     ]);
     if (name) await connector(['remove', name]);
   }
+}
+
+// Local connectors for the official Desktop; remote ones are added in its own
+// Settings → Connectors, since they belong to the claude.ai account.
+async function officialConnectorMenu() {
+  const added = officialConnectors();
+  const local = Object.entries(CONNECTOR_PRESETS).filter(([, p]) => p.local);
+  const choice = await select(`${bold('Official Desktop connectors')}  ${dim('runs on this machine · remote ones: its Settings → Connectors')}`, [
+    ...local.map(([id, p]) => ({ label: p.label, value: `add:${id}`, hint: added.some((c) => c.name === id) ? green('✓ added') : '' })),
+    { section: 'Manage' },
+    { label: 'Remove a connector…', value: 'remove', disabled: !added.length },
+    { label: 'List connectors', value: 'list' },
+    { label: 'Back', value: null },
+  ]);
+  if (!choice) return;
+  if (choice === 'list') return connector(['list', '--official']);
+  if (choice === 'remove') {
+    const name = await select('Remove which connector from the official Desktop?', [
+      ...added.map((c) => ({ label: c.name, value: c.name, hint: c.command || c.url || '' })),
+      { label: 'Back', value: null },
+    ]);
+    if (name) await connector(['remove', name, '--official']);
+    return;
+  }
+  const id = choice.slice(4);
+  if (CONNECTOR_PRESETS[id].local === 'gmail' && !readGmail()?.refreshToken) {
+    console.log(dim(`\n  Sign in to Gmail first: add it to the gateway (Connectors → Gmail) or run ccgw connector add gmail --official --client-json <file>.\n`));
+    return;
+  }
+  return connector(['add', id, '--official']);
 }
 
 const [cmd, ...args] = process.argv.slice(2);

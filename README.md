@@ -197,6 +197,8 @@ Connectors live in the "Claude Code (ccgw)" profile, so they work the same on ma
 | `figma-local` | Figma Desktop through a plugin, **no plan limits** | none; run the plugin in Figma |
 | `refigma` | Figma links → HTML / React + Tailwind, SVG, tokens via [refigma-mcp](https://github.com/haonguyenstech/refigma-mcp); a **View seat** is enough | macOS: your figma.com session in Edge; Windows: sign in once in an Edge window |
 
+> 🪪 **The official Desktop too.** `ccgw connector add refigma --official` (or *Connectors… → Official Desktop*) puts a local connector in the claude.ai-signed-in Desktop instead, in its own `claude_desktop_config.json`. Only the official Desktop is restarted, and it stays signed in; the gateway Desktop and its profile are left alone. Remote connectors for that one come from your claude.ai account (its *Settings → Connectors*), so `--official` takes only `refigma`, `gmail` and `figma-local`, and they run in that Desktop on this machine, not on claude.ai web or mobile.
+
 <details>
 <summary><b>Remote connectors (OAuth)</b></summary>
 
@@ -353,6 +355,7 @@ Desktop reads the mode only when it starts, and keeps one process per data dir.
 | `ccgw desktop official status` / `quit` | is it running and signed in / quit it, keeping the sign-in |
 | `ccgw connector add <preset>` | add a connector to Desktop, see [Connectors](#connectors) |
 | `ccgw connector list` / `remove <name>` | |
+| `ccgw connector add <preset> --official` | add a local connector (`refigma`, `gmail`, `figma-local`) to the official Desktop instead; `list` / `remove` take `--official` too |
 | `ccgw permissions [bypass\|ask] [name]` | skip or restore Desktop's per-tool permission prompts |
 | `ccgw figma status` / `plugin [--restart-figma]` | check the `figma-local` bridge / add the plugin to Figma Desktop |
 | `ccgw gmail status\|login\|logout` | manage the `gmail` sign-in |
