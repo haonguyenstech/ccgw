@@ -159,6 +159,71 @@ export function select(title, items, { initial = 0 } = {}) {
   });
 }
 
+// Resolves to the ticked items' values (in list order), or null on Esc / q /
+// Ctrl+C. Space ticks, a ticks or clears all, enter confirms.
+// items: [{ label, value, hint?, checked? } | { section: 'NAME' }]
+export function checklist(title, items) {
+  return new Promise((resolve) => {
+    const { stdin, stdout } = process;
+    const pickable = items.map((it, i) => (it.section ? -1 : i)).filter((i) => i >= 0);
+    const ticked = new Set(pickable.filter((i) => items[i].checked));
+    let cursor = pickable[0];
+    let drawn = 0;
+    const labelW = Math.max(...pickable.map((i) => width(items[i].label)));
+    const box = (on) => (ascii ? (on ? '[x]' : '[ ]') : on ? '◉' : '○');
+
+    const render = () => {
+      if (drawn) stdout.write(`${ESC}${drawn}A${ESC}0J`);
+      const lines = [...(Array.isArray(title) ? title : [bold(title)]), ''];
+      items.forEach((it, i) => {
+        if (it.section) {
+          if (i > 0) lines.push('');
+          return lines.push(`  ${dim(bold(it.section.toUpperCase()))}`);
+        }
+        const on = i === cursor;
+        const mark = ticked.has(i) ? accent(box(true)) : dim(box(false));
+        const label = it.hint ? pad(it.label, labelW) : it.label;
+        const hint = it.hint ? `   ${dim(it.hint)}` : '';
+        lines.push(`  ${on ? accent(G.pointer) : ' '} ${mark} ${on ? bold(accent(label)) : label}${hint}`);
+      });
+      lines.push('', dim(`  ${G.keys} · space tick · a all/none · enter confirm (${ticked.size} ticked) · esc back`));
+      stdout.write(lines.join('\n') + '\n');
+      drawn = lines.length;
+    };
+
+    const done = (value) => {
+      stdin.removeListener('keypress', onKey);
+      if (stdin.isTTY) stdin.setRawMode(false);
+      stdin.pause();
+      stdout.write(`${ESC}${drawn}A${ESC}0J${ESC}?25h`);
+      cursorHidden = false;
+      paused--;
+      if (value) stdout.write(`${accent(G.picked)} ${bold(value.length ? pickable.filter((i) => ticked.has(i)).map((i) => items[i].label).join(', ') : 'nothing ticked')}\n`);
+      resolve(value);
+    };
+
+    const onKey = (str, key = {}) => {
+      if (key.ctrl && key.name === 'c') return done(null);
+      const at = pickable.indexOf(cursor);
+      if (key.name === 'up' || key.name === 'k') { cursor = pickable[(at - 1 + pickable.length) % pickable.length]; return render(); }
+      if (key.name === 'down' || key.name === 'j' || key.name === 'tab') { cursor = pickable[(at + 1) % pickable.length]; return render(); }
+      if (key.name === 'space') { ticked.has(cursor) ? ticked.delete(cursor) : ticked.add(cursor); return render(); }
+      if (str === 'a') { if (ticked.size === pickable.length) ticked.clear(); else pickable.forEach((i) => ticked.add(i)); return render(); }
+      if (key.name === 'return' || key.name === 'enter') return done(pickable.filter((i) => ticked.has(i)).map((i) => items[i].value));
+      if (key.name === 'escape' || key.name === 'q' || key.name === 'left') return done(null);
+    };
+
+    paused++;
+    readline.emitKeypressEvents(stdin);
+    if (stdin.isTTY) stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on('keypress', onKey);
+    stdout.write(`${ESC}?25l`);
+    cursorHidden = true;
+    render();
+  });
+}
+
 // Resolves to the typed line (trimmed), or null if left empty / cancelled.
 export function prompt(question, { placeholder } = {}) {
   return new Promise((resolve) => {

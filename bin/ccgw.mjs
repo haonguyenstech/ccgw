@@ -10,7 +10,8 @@ import { readConfig, writeConfig, newKey, PID_FILE, LOG_FILE, CONFIG_FILE, HOME_
 import { gmailLogin, gmailLogout, readGmail, serveGmail, GMAIL_FILE } from '../src/gmail.mjs';
 import { installFigma, serveFigma, figmaStatus, registerPlugin, pluginRegistered, PLUGIN_MANIFEST, RELAY_PORT } from '../src/figma.mjs';
 import { latestVersion, requirements, supportsPlatform, refigmaEntry, entryVersion, probe, findPython, installPython } from '../src/refigma.mjs';
-import { interactive, select, prompt, panel, accent, screen, lastLines } from '../src/menu.mjs';
+import { interactive, select, checklist, prompt, panel, accent, screen, lastLines } from '../src/menu.mjs';
+import { syncSupported, officialCookies, claudeAi, gatewayStore, writeSession, removeSession, sessionUntouched, sessionExists, writeSpace, officialSkills, installSkills, installedSkills } from '../src/sync.mjs';
 import { logo } from '../src/logo.mjs';
 import { provider, claudeToken, timeLeft, statusLine, loginRunning, openLogin } from '../src/credential.mjs';
 import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/update.mjs';
@@ -917,6 +918,7 @@ function help() {
   ccgw connector list | remove <name>
   ccgw connector add refigma --official   a local connector (refigma, gmail, figma-local) in the official claude.ai Desktop instead
   ccgw connector list --official | remove <name> --official
+  ccgw sync [--project <name>]… [--all-projects] [--chats] [--skills] [--all] [--since <days>]   copy claude.ai chats, projects and skills from the official Desktop into the gateway one (macOS)
   ccgw permissions bypass [name]   skip Desktop's "Claude wants to use …" prompts (all connectors, or one)
   ccgw permissions ask [name]      prompt again;  ccgw permissions  shows the current setting
   ccgw connector add gmail --client-json <file>   Gmail via your Google OAuth client (runs locally)
@@ -1002,6 +1004,7 @@ async function run(cmd, args) {
     case 'logs': return logs(args);
     case 'desktop': return desktop(args);
     case 'connector': case 'connectors': return connector(args);
+    case 'sync': return sync(args);
     case 'gmail': return gmail(args);
     case 'figma': return figma(args);
     case 'permissions': case 'perms': return permissions(args);
@@ -1057,6 +1060,7 @@ async function menu() {
           { label: 'Open gateway Desktop', value: 'open-gateway', hint: up ? 'Claude Code' : 'starts the gateway too' },
           ...(officialSupported ? [{ label: 'Open official Desktop', value: 'official', hint: officialSession() ? 'claude.ai, next to the gateway one' : 'sign in once with claude.ai' }] : []),
           { label: 'Connectors…', value: 'connectors', hint: `${names.length} added` },
+          ...(officialSupported && syncSupported ? [{ label: 'Sync from official…', value: 'sync', hint: 'claude.ai chats, projects, skills → gateway' }] : []),
           bypassAll()
             ? { label: 'Permission prompts: off', value: 'perms-ask', hint: 'turn back on (restarts Desktop)' }
             : { label: 'Permission prompts: on', value: 'perms-bypass', hint: 'bypass for all connectors (restarts Desktop)' },
@@ -1092,6 +1096,7 @@ async function menu() {
           case 'open-gateway': await openGateway(); break;
           case 'official': await official([]); break;
           case 'connectors': await connectorMenu(); break;
+          case 'sync': await sync([]); break;
           case 'perms-bypass': await permissions(['bypass']); break;
           case 'perms-ask': await permissions(['ask']); break;
           case 'check': {
@@ -1206,6 +1211,129 @@ async function officialConnectorMenu() {
     return;
   }
   return connector(['add', id, '--official']);
+}
+
+// ---------------------------------------------------------------- sync from the official Desktop
+
+// Chats, projects and skills from the claude.ai account the official Desktop
+// is signed in to, copied into the gateway Desktop. Re-running only brings
+// what changed: a chat updated on claude.ai replaces its gateway copy unless
+// that copy was continued in the gateway, then it comes in as a new one.
+const SYNC_FILE = path.join(HOME_DIR, 'sync.json');
+const OUTSIDE = '__chats__';
+const SKILLS = '__skills__';
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+
+async function sync(args) {
+  if (!syncSupported || !officialSupported) fail('ccgw sync needs macOS for now.');
+  const listOnly = args.includes('--list');
+  const since = flag(args, '--since');
+  const sinceMs = since ? Date.now() - Number(String(since).replace(/d$/, '')) * 86_400_000 : 0;
+  if (since && !Number.isFinite(sinceMs)) fail('--since takes a number of days, e.g. --since 7');
+
+  console.log(dim('Reading claude.ai through the official Desktop’s sign-in (macOS may ask for the "Claude Safe Storage" Keychain item: click Allow)…'));
+  let api, convs, projects;
+  try {
+    api = claudeAi(officialCookies(OFFICIAL_DIR));
+    [convs, projects] = await Promise.all([api.conversations(), api.projects()]);
+  } catch (e) {
+    fail(e.message);
+  }
+  convs = convs.filter((c) => !sinceMs || new Date(c.updated_at).getTime() >= sinceMs);
+  const inProject = (id) => convs.filter((c) => c.project_uuid === id);
+  const outside = convs.filter((c) => !c.project_uuid || !projects.some((p) => p.uuid === c.project_uuid));
+  const store = gatewayStore(desktop3pDir());
+  const skills = officialSkills(OFFICIAL_DIR).filter((s) => !store.builtinSkills.has(s.name));
+  const haveSkills = installedSkills(store);
+  const newSkills = skills.filter((s) => !haveSkills.has(s.name)).length;
+  const skillHint = skills.length ? `${skills.length}: ${skills.map((s) => s.name).join(', ')}${haveSkills.size ? ` · ${newSkills} new` : ''}` : 'none the gateway lacks';
+  const state = readJson(SYNC_FILE, { conversations: {}, projects: {} });
+  const fresh = (list) => list.filter((c) => state.conversations[c.uuid]?.updatedAt !== c.updated_at).length;
+
+  if (listOnly) {
+    for (const p of projects) console.log(`  ${cyan(p.name.padEnd(28))} ${plural(inProject(p.uuid).length, 'chat')} ${dim(`(${fresh(inProject(p.uuid))} new or changed)`)}`);
+    console.log(`  ${cyan('Chats outside projects'.padEnd(28))} ${plural(outside.length, 'chat')} ${dim(`(${fresh(outside)} new or changed)`)}`);
+    console.log(`  ${cyan('Skills'.padEnd(28))} ${skillHint}`);
+    return;
+  }
+
+  let picked;
+  const named = args.flatMap((a, i) => (a === '--project' ? [args[i + 1]] : []));
+  if (args.includes('--all')) picked = [...projects.map((p) => p.uuid), OUTSIDE, SKILLS];
+  else if (named.length || args.includes('--all-projects') || args.includes('--chats') || args.includes('--skills')) {
+    const want = named.map((n) => n.toLowerCase());
+    const unknown = want.filter((n) => !projects.some((p) => p.name.toLowerCase() === n));
+    if (unknown.length) fail(`no claude.ai project named ${unknown.map((n) => `"${n}"`).join(', ')}. Projects: ${projects.map((p) => p.name).join(', ')}`);
+    picked = [
+      ...projects.filter((p) => args.includes('--all-projects') || want.includes(p.name.toLowerCase())).map((p) => p.uuid),
+      ...(args.includes('--chats') ? [OUTSIDE] : []),
+      ...(args.includes('--skills') ? [SKILLS] : []),
+    ];
+  } else if (interactive()) {
+    picked = await checklist(`${bold('Sync from the official Desktop')}  ${dim('claude.ai → gateway · tick what to copy')}`, [
+      { section: 'Projects' },
+      ...projects.map((p) => ({ label: p.name, value: p.uuid, hint: `${plural(inProject(p.uuid).length, 'chat')} · ${fresh(inProject(p.uuid))} new or changed`, checked: !!state.projects[p.uuid] })),
+      { section: 'Other' },
+      { label: 'Chats outside projects', value: OUTSIDE, hint: `${plural(outside.length, 'chat')} · ${fresh(outside)} new or changed` },
+      { label: 'Skills', value: SKILLS, hint: skillHint, checked: newSkills > 0 },
+    ]);
+    if (!picked?.length) return;
+  } else {
+    fail('usage: ccgw sync [--project <name>]… [--all-projects] [--chats] [--skills] [--all] [--since <days>] [--list] [--no-restart]');
+  }
+
+  // Everything is fetched first, so the gateway Desktop is closed only for the write.
+  const todo = [];
+  const spaces = [];
+  for (const p of projects.filter((x) => picked.includes(x.uuid))) {
+    spaces.push({ project: { ...p, ...(await api.project(p.uuid)) }, docs: await api.docs(p.uuid).catch(() => []) });
+  }
+  const chosen = [...projects.filter((p) => picked.includes(p.uuid)).flatMap((p) => inProject(p.uuid)), ...(picked.includes(OUTSIDE) ? outside : [])];
+  const changed = chosen.filter((c) => !(state.conversations[c.uuid] && sessionExists(store, state.conversations[c.uuid]) && state.conversations[c.uuid].updatedAt === c.updated_at));
+  for (const [i, c] of changed.entries()) {
+    process.stdout.write(dim(`\r  fetching chats ${i + 1}/${changed.length}…`));
+    todo.push(await api.conversation(c.uuid));
+  }
+  if (changed.length) process.stdout.write('\r\x1b[K');
+
+  const counts = { added: 0, updated: 0, kept: 0, spaces: 0, skills: 0 };
+  const write = () => {
+    for (const { project, docs } of spaces) {
+      const s = writeSpace(store, project, docs, state.projects[project.uuid]);
+      state.projects[project.uuid] = s.id;
+      project.space = s;
+      counts.spaces++;
+    }
+    const spaceOf = (c) => spaces.find((s) => s.project.uuid === c.project_uuid)?.project.space || null;
+    for (const conv of todo) {
+      const prev = state.conversations[conv.uuid];
+      let sid;
+      if (prev && sessionExists(store, prev)) {
+        if (sessionUntouched(store, prev)) { removeSession(store, prev.session); sid = prev.session.replace(/^local_/, ''); counts.updated++; }
+        else counts.kept++;
+      }
+      if (!sid && !(prev && sessionExists(store, prev))) counts.added++;
+      state.conversations[conv.uuid] = writeSession(store, conv, { sid: sid || undefined, space: spaceOf(conv) });
+    }
+    if (picked.includes(SKILLS) && skills.length) { installSkills(store, skills, VERSION); counts.skills = skills.length; }
+    writeJson(SYNC_FILE, state);
+  };
+
+  const nothing = !todo.length && !spaces.length && !(picked.includes(SKILLS) && skills.length);
+  if (nothing) return console.log(green('✓ already in sync') + dim('  (nothing new on claude.ai)'));
+  const restart = desktopRunning() && !args.includes('--no-restart');
+  if (restart) {
+    console.log(dim('The gateway Desktop restarts to load them (Desktop rewrites its project list while running).'));
+    await withDesktopClosed(write);
+  } else write();
+
+  console.log(green('✓ synced from claude.ai') + dim(`  (${[
+    counts.added && `${plural(counts.added, 'chat')} added`, counts.updated && `${counts.updated} updated`,
+    counts.kept && `${counts.kept} continued in the gateway, copied again alongside`,
+    counts.spaces && plural(counts.spaces, 'project'), counts.skills && plural(counts.skills, 'skill'),
+  ].filter(Boolean).join(', ') || 'projects refreshed'})`));
+  if (!restart && desktopRunning()) console.log(dim('  Restart the gateway Desktop to see them (ccgw desktop open after quitting it).'));
+  console.log(dim('  Chats come over as text: images and PDFs stay on claude.ai, and only the branch shown there is copied.'));
 }
 
 const [cmd, ...args] = process.argv.slice(2);

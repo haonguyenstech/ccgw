@@ -2,6 +2,7 @@
 // surface, and survival when the Claude Code CLI can't be spawned.
 import fs from 'node:fs';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { execFileSync, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -128,6 +129,61 @@ try {
       ccgw('connector', 'remove', 'gmail', '--official', '--no-restart');
       check('connector remove --official', !offGmail().mcpServers.gmail && offGmail().preferences?.keep === 1 && ccgw('connector', 'list') === gatewayBefore);
     }
+  }
+
+  {
+    // sync: a claude.ai chat becomes a gateway Cowork session whose audit log
+    // verifies the way Desktop checks it, inside the project it came from.
+    process.env.CCGW_SAFE_STORAGE_PASSWORD = 'test-password';
+    const S = await import('../src/sync.mjs');
+    const d3p = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-sync-'));
+    const acct = '4160577b-03c9-41b8-aa76-0b8381248e8a';
+    fs.mkdirSync(path.join(d3p, 'local-agent-mode-sessions', 'skills-plugin', '00000000-0000-4000-8000-000000000001', acct, 'skills', 'docx'), { recursive: true });
+    fs.mkdirSync(path.join(d3p, 'local-agent-mode-sessions', '4160577b', '00000000'), { recursive: true });
+    const store = S.gatewayStore(d3p);
+    store.filesDir = path.join(d3p, 'files');
+    const space = S.writeSpace(store, { uuid: 'p1', name: 'Demo/Pro', prompt_template: 'Be brief.' }, [{ file_name: 'notes.md', content: 'hi' }]);
+    const conv = { uuid: 'c1', name: 'What is today', created_at: '2026-10-15T07:06:00Z', updated_at: '2026-10-15T07:07:00Z', current_leaf_message_uuid: 'm4', chat_messages: [
+      { uuid: 'm1', parent_message_uuid: '00000000-0000-4000-8000-000000000000', sender: 'human', index: 0, created_at: '2026-10-15T07:06:00Z', content: [{ type: 'text', text: 'hi' }] },
+      { uuid: 'm2', parent_message_uuid: 'm1', sender: 'assistant', index: 1, created_at: '2026-10-15T07:06:01Z', content: [{ type: 'text', text: 'Hi there!' }] },
+      { uuid: 'm3', parent_message_uuid: 'm2', sender: 'human', index: 2, created_at: '2026-10-15T07:06:02Z', content: [{ type: 'text', text: 'what is today' }] },
+      { uuid: 'mx', parent_message_uuid: 'm3', sender: 'assistant', index: 3, created_at: '2026-10-15T07:06:03Z', content: [{ type: 'text', text: 'an edited-away branch' }] },
+      { uuid: 'm4', parent_message_uuid: 'm3', sender: 'assistant', index: 4, created_at: '2026-10-15T07:06:04Z', content: [{ type: 'text', text: 'Thursday.' }] },
+    ] };
+    const rec = S.writeSession(store, conv, { space });
+    const sdir = path.join(store.base, rec.session.slice(6, 14));
+    const k = crypto.pbkdf2Sync('test-password', 'saltysalt', 1003, 16, 'sha1');
+    const raw = fs.readFileSync(path.join(sdir, '.audit-key'));
+    const dec = crypto.createDecipheriv('aes-128-cbc', k, Buffer.alloc(16, ' '));
+    const hkey = Buffer.from(Buffer.concat([dec.update(raw.subarray(3)), dec.final()]).toString(), 'base64');
+    let prev = 'audit-chain-genesis', chainOk = true;
+    for (const line of fs.readFileSync(path.join(sdir, 'audit.jsonl'), 'utf8').trim().split('\n')) {
+      const { _audit_hmac, ...o } = JSON.parse(line);
+      if (crypto.createHmac('sha256', hkey).update(prev).update(JSON.stringify(o)).digest('hex') !== _audit_hmac) chainOk = false;
+      prev = _audit_hmac;
+    }
+    check('sync audit log verifies', chainOk);
+    const meta = JSON.parse(fs.readFileSync(path.join(store.base, `${rec.session}.json`), 'utf8'));
+    const tr = fs.readFileSync(path.join(sdir, '.claude/projects/session', `${meta.cliSessionId}.jsonl`), 'utf8');
+    check('sync keeps the shown branch', tr.includes('Thursday.') && !tr.includes('edited-away') && meta.title === 'What is today');
+    check('sync puts the chat in its project', meta.spaceId === space.id && meta.userSelectedFolders[0] === space.folder
+      && fs.readFileSync(path.join(space.folder, 'Project instructions.md'), 'utf8') === 'Be brief.' && fs.existsSync(path.join(space.folder, 'notes.md')));
+    check('sync reuses the project on the next run', S.writeSpace(store, { uuid: 'p1', name: 'Demo/Pro' }, [], space.id).id === space.id
+      && JSON.parse(fs.readFileSync(path.join(store.base, 'spaces.json'), 'utf8')).spaces.length === 1);
+    check('sync sees an untouched copy', S.sessionUntouched(store, rec));
+    fs.appendFileSync(path.join(sdir, 'audit.jsonl'), '{}\n');
+    check('sync sees a continued copy', !S.sessionUntouched(store, rec));
+    const skillSrc = path.join(d3p, 'src-skills', 'morning');
+    fs.mkdirSync(skillSrc, { recursive: true });
+    fs.writeFileSync(path.join(skillSrc, 'SKILL.md'), '---\nname: morning\n---\n');
+    const plug = S.installSkills(store, [{ name: 'morning', dir: skillSrc }], '1.2.3');
+    const inst = JSON.parse(fs.readFileSync(path.join(store.base, 'cowork_plugins', 'installed_plugins.json'), 'utf8'));
+    const enabled = JSON.parse(fs.readFileSync(path.join(store.base, 'cowork_settings.json'), 'utf8')).enabledPlugins;
+    check('sync installs skills as an uploaded plugin', fs.existsSync(path.join(plug, 'skills', 'morning', 'SKILL.md'))
+      && inst.plugins['claude-ai-skills@local-desktop-app-uploads'][0].installPath === plug && enabled['claude-ai-skills@local-desktop-app-uploads'] === true
+      && store.builtinSkills.has('docx'));
+    S.removeSession(store, rec.session);
+    check('sync removes a session', !fs.existsSync(sdir) && !fs.existsSync(path.join(store.base, `${rec.session}.json`)));
   }
 
   {

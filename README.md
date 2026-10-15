@@ -186,6 +186,24 @@ ccgw status
 
 ---
 
+## Sync from claude.ai
+
+Chats you had in the official Desktop live on claude.ai; the gateway Desktop keeps its own on disk. `ccgw sync` (or *Sync from official…* in the menu) copies them across, one way, on macOS:
+
+```bash
+ccgw sync                              # tick projects, "Chats outside projects" and "Skills"
+ccgw sync --project "Demo Pro" --skills
+ccgw sync --all --since 7              # everything changed in the last 7 days
+ccgw sync --list                       # what there is, and how much is new
+```
+
+- **Projects** become gateway projects of the same name. Their instructions and knowledge files go in `~/Claude/Projects/<name>`, the project's folder, and their chats sit inside them.
+- **Chats** become Cowork tasks you can open and continue. They come over as text: images and PDFs stay on claude.ai, and only the branch claude.ai shows is copied.
+- **Skills** the gateway Desktop lacks (skill-creator, deep-research, …) are installed as one local plugin, `claude-ai-skills`.
+- Running it again only brings what changed. A chat updated on claude.ai replaces its gateway copy, unless you continued that copy in the gateway; then the new version comes in next to it.
+
+It reads claude.ai with the official Desktop's own sign-in (macOS asks once for the *Claude Safe Storage* Keychain item) and never writes to the official Desktop or your account. The gateway Desktop restarts to load what was copied (`--no-restart` skips that).
+
 ## Connectors
 
 Connectors live in the "Claude Code (ccgw)" profile, so they work the same on macOS and Windows.
@@ -356,6 +374,7 @@ Desktop reads the mode only when it starts, and keeps one process per data dir.
 | `ccgw connector add <preset>` | add a connector to Desktop, see [Connectors](#connectors) |
 | `ccgw connector list` / `remove <name>` | |
 | `ccgw connector add <preset> --official` | add a local connector (`refigma`, `gmail`, `figma-local`) to the official Desktop instead; `list` / `remove` take `--official` too |
+| `ccgw sync` | copy claude.ai chats, ticked projects and skills from the official Desktop into the gateway one (macOS), see [Sync from claude.ai](#sync-from-claudeai) |
 | `ccgw permissions [bypass\|ask] [name]` | skip or restore Desktop's per-tool permission prompts |
 | `ccgw figma status` / `plugin [--restart-figma]` | check the `figma-local` bridge / add the plugin to Figma Desktop |
 | `ccgw gmail status\|login\|logout` | manage the `gmail` sign-in |
