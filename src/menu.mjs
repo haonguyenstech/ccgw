@@ -37,6 +37,49 @@ export function panel(rows) {
 
 let cursorHidden = false;
 
+// The menu runs on the terminal's alternate screen, like a full-screen app:
+// each round redraws from the top with only the last action's output, and
+// quitting gives the shell back as it was. While on it, everything written
+// is taped (except the selector drawing itself) so that output can be shown
+// again on the next round and once more after leaving.
+const realOut = process.stdout.write.bind(process.stdout);
+const realErr = process.stderr.write.bind(process.stderr);
+let tape = null;
+let paused = 0;
+let alt = false;
+const tap = (real) => (chunk, ...rest) => {
+  if (tape !== null && !paused) tape += String(chunk);
+  return real(chunk, ...rest);
+};
+
+export const screen = {
+  enter() {
+    if (alt) return;
+    realOut(`${ESC}?1049h`);
+    alt = true;
+    process.stdout.write = tap(realOut);
+    process.stderr.write = tap(realErr);
+  },
+  leave() {
+    if (!alt) return;
+    process.stdout.write = realOut;
+    process.stderr.write = realErr;
+    realOut(`${ESC}?1049l`);
+    alt = false;
+    tape = null;
+  },
+  clear: () => realOut(`${ESC}H${ESC}2J`),
+  record() { tape = ''; },
+  stop() { const t = tape ?? ''; tape = null; return t; },
+};
+
+// Keeps the last `max` lines of an action's output, noting how many went.
+export function lastLines(text, max) {
+  const lines = text.replace(/\s+$/, '').split('\n');
+  if (lines.length <= max) return lines.join('\n');
+  return [dim(`  … ${lines.length - max + 1} earlier lines`), ...lines.slice(-(max - 1))].join('\n');
+}
+
 export const interactive = () => !!(process.stdin.isTTY && process.stdout.isTTY);
 
 // Resolves to the chosen item's value, or null on Esc / q / Ctrl+C.
@@ -85,6 +128,7 @@ export function select(title, items, { initial = 0 } = {}) {
       stdin.pause();
       stdout.write(`${ESC}${drawn}A${ESC}0J${ESC}?25h`);
       cursorHidden = false;
+      paused--;
       if (value !== null) stdout.write(`${accent(G.picked)} ${bold(items.find((it) => it.value === value).label)}\n`);
       resolve(value);
     };
@@ -104,6 +148,7 @@ export function select(title, items, { initial = 0 } = {}) {
       }
     };
 
+    paused++;
     readline.emitKeypressEvents(stdin);
     if (stdin.isTTY) stdin.setRawMode(true);
     stdin.resume();
@@ -129,5 +174,8 @@ export function prompt(question, { placeholder } = {}) {
   });
 }
 
-// Restore the cursor even if the process is killed mid-menu.
-process.on('exit', () => { if (cursorHidden) process.stdout.write(`${ESC}?25h`); });
+// Restore the cursor and the shell's screen even if the process dies mid-menu.
+process.on('exit', () => {
+  if (cursorHidden) realOut(`${ESC}?25h`);
+  if (alt) realOut(`${ESC}?1049l`);
+});

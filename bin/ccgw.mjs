@@ -10,7 +10,7 @@ import { readConfig, writeConfig, newKey, PID_FILE, LOG_FILE, CONFIG_FILE, HOME_
 import { gmailLogin, gmailLogout, readGmail, serveGmail, GMAIL_FILE } from '../src/gmail.mjs';
 import { installFigma, serveFigma, figmaStatus, registerPlugin, pluginRegistered, PLUGIN_MANIFEST, RELAY_PORT } from '../src/figma.mjs';
 import { latestVersion, requirements, supportsPlatform, refigmaEntry, entryVersion, probe, findPython, installPython } from '../src/refigma.mjs';
-import { interactive, select, prompt, panel, accent } from '../src/menu.mjs';
+import { interactive, select, prompt, panel, accent, screen, lastLines } from '../src/menu.mjs';
 import { logo } from '../src/logo.mjs';
 import { provider, claudeToken, timeLeft, statusLine, loginRunning, openLogin } from '../src/credential.mjs';
 import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/update.mjs';
@@ -982,83 +982,101 @@ async function run(cmd, args) {
 
 async function menu() {
   if (!interactive()) return help();
-  console.log(logo(VERSION) || `${bold('ccgw')} ${dim('v' + VERSION)}`);
+  const title = logo(VERSION) || `${bold('ccgw')} ${dim('v' + VERSION)}`;
   let last = 0;
-  while (true) {
-    const cfg = readConfig();
-    const h = await health(cfg, 800);
-    const up = !!h;
-    const mode = desktopSupported ? (getMode() === '3p' ? 'gateway' : 'login') : null;
-    const names = connectors().map((c) => c.name);
-    const latest = cachedLatest();
-    const outdated = isNewer(latest, VERSION);
-    const cred = provider(cfg);
-    const header = panel([
-      ['Gateway', up
-        ? `${green('● running')}  ${dim(baseUrl(cfg))}${h.sessions ? dim(` · ${h.sessions} chat${h.sessions > 1 ? 's' : ''}`) : ''}`
-        : `${red('○ stopped')}  ${dim('Claude Desktop cannot answer until it starts')}`],
-      ...(cred ? [['Login', `${cred.name}${(() => { const w = statusLine(cred); return w ? dim(` · ${w}`) : ''; })()}  ${loginLeft()}`]] : []),
-      ...(desktopSupported ? [
-        ['Desktop', mode === 'gateway' ? `${accent('◆')} gateway mode ${dim('(uses Claude Code)')}` : `◇ login mode ${dim('(claude.ai account)')}`],
-        ...(officialSupported && (officialRunning() || officialSession())
-          ? [['Official', `${officialRunning() ? green('● running') : '○ closed'} ${dim(officialSession() ? '· claude.ai, signed in' : '· not signed in')}`]] : []),
-        ['Connectors', names.length ? names.slice(0, 4).join(dim(', ')) + (names.length > 4 ? dim(` +${names.length - 4}`) : '') : dim('none')],
-        ['Permissions', bypassAll() ? `${accent('bypassed')} ${dim('· tools run without asking')}` : `prompts on ${dim('· Desktop asks before each tool')}`],
-      ] : []),
-      ['Version', `v${VERSION}  ${outdated ? accent(`v${latest} available`) : dim('up to date')}`],
-    ]);
-    const items = [
-      { section: 'Gateway' },
-      up ? { label: 'Stop', value: 'stop' } : { label: 'Start', value: 'start', hint: 'needed for gateway mode' },
-      { label: 'Restart', value: 'restart', disabled: !up },
-      { label: 'Connection info', value: 'info', hint: 'URL + key for Claude Desktop' },
-      ...(cred ? [{ label: `Sign in with ${cred.name}`, value: 'cred-login', hint: 'runs here, quit it to come back' }] : []),
-      ...(desktopSupported ? [
-        { section: 'Claude Desktop' },
-        { label: 'Switch mode…', value: 'desktop', hint: mode === 'gateway' ? 'to claude.ai login' : 'to gateway' },
-        { label: 'Open gateway Desktop', value: 'open-gateway', hint: up ? 'Claude Code' : 'starts the gateway too' },
-        ...(officialSupported ? [{ label: 'Open official Desktop', value: 'official', hint: officialSession() ? 'claude.ai, next to the gateway one' : 'sign in once with claude.ai' }] : []),
-        { label: 'Connectors…', value: 'connectors', hint: `${names.length} added` },
-        bypassAll()
-          ? { label: 'Permission prompts: off', value: 'perms-ask', hint: 'turn back on (restarts Desktop)' }
-          : { label: 'Permission prompts: on', value: 'perms-bypass', hint: 'bypass for all connectors (restarts Desktop)' },
-      ] : []),
-      { section: 'ccgw' },
-      outdated
-        ? { label: `Update to v${latest}`, value: 'update', hint: `installed v${VERSION}` }
-        : { label: 'Check for updates', value: 'check' },
-      { label: 'Quit', value: 'quit' },
-    ];
-    const choice = await select(header, items, { initial: last });
-    if (choice === null || choice === 'quit') return;
-    last = items.findIndex((it) => it.value === choice);
-    try {
-      switch (choice) {
-        case 'start': await start([]); break;
-        case 'stop': await stop(); break;
-        case 'restart': await stop({ quiet: true }); await start([]); break;
-        case 'info': printInfo(cfg); break;
-        case 'cred-login': await credential(['login']); break;
-        case 'desktop': await desktopMenu(mode); break;
-        case 'open-gateway': await openGateway(); break;
-        case 'official': await official([]); break;
-        case 'connectors': await connectorMenu(); break;
-        case 'perms-bypass': await permissions(['bypass']); break;
-        case 'perms-ask': await permissions(['ask']); break;
-        case 'update': await update([]); return;
-        case 'check': {
-          const latest = await checkForUpdate({ force: true, timeoutMs: 10000 }).catch((e) => fail(e.message));
-          console.log(isNewer(latest, VERSION)
-            ? `${bold(`ccgw v${latest}`)} is available ${dim(`(installed: v${VERSION}) — pick "Update to v${latest}" below`)}`
-            : green(`✓ ccgw v${VERSION} is up to date`));
-          break;
-        }
+  let output = ''; // what the last action printed
+  screen.enter();
+  try {
+    while (true) {
+      const cfg = readConfig();
+      const h = await health(cfg, 800);
+      const up = !!h;
+      const mode = desktopSupported ? (getMode() === '3p' ? 'gateway' : 'login') : null;
+      const names = connectors().map((c) => c.name);
+      const latest = cachedLatest();
+      const outdated = isNewer(latest, VERSION);
+      const cred = provider(cfg);
+      const header = panel([
+        ['Gateway', up
+          ? `${green('● running')}  ${dim(baseUrl(cfg))}${h.sessions ? dim(` · ${h.sessions} chat${h.sessions > 1 ? 's' : ''}`) : ''}`
+          : `${red('○ stopped')}  ${dim('Claude Desktop cannot answer until it starts')}`],
+        ...(cred ? [['Login', `${cred.name}${(() => { const w = statusLine(cred); return w ? dim(` · ${w}`) : ''; })()}  ${loginLeft()}`]] : []),
+        ...(desktopSupported ? [
+          ['Desktop', mode === 'gateway' ? `${accent('◆')} gateway mode ${dim('(uses Claude Code)')}` : `◇ login mode ${dim('(claude.ai account)')}`],
+          ...(officialSupported && (officialRunning() || officialSession())
+            ? [['Official', `${officialRunning() ? green('● running') : '○ closed'} ${dim(officialSession() ? '· claude.ai, signed in' : '· not signed in')}`]] : []),
+          ['Connectors', names.length ? names.slice(0, 4).join(dim(', ')) + (names.length > 4 ? dim(` +${names.length - 4}`) : '') : dim('none')],
+          ['Permissions', bypassAll() ? `${accent('bypassed')} ${dim('· tools run without asking')}` : `prompts on ${dim('· Desktop asks before each tool')}`],
+        ] : []),
+        ['Version', `v${VERSION}  ${outdated ? accent(`v${latest} available`) : dim('up to date')}`],
+      ]);
+      const items = [
+        { section: 'Gateway' },
+        up ? { label: 'Stop', value: 'stop' } : { label: 'Start', value: 'start', hint: 'needed for gateway mode' },
+        { label: 'Restart', value: 'restart', disabled: !up },
+        { label: 'Connection info', value: 'info', hint: 'URL + key for Claude Desktop' },
+        ...(cred ? [{ label: `Sign in with ${cred.name}`, value: 'cred-login', hint: 'runs here, quit it to come back' }] : []),
+        ...(desktopSupported ? [
+          { section: 'Claude Desktop' },
+          { label: 'Switch mode…', value: 'desktop', hint: mode === 'gateway' ? 'to claude.ai login' : 'to gateway' },
+          { label: 'Open gateway Desktop', value: 'open-gateway', hint: up ? 'Claude Code' : 'starts the gateway too' },
+          ...(officialSupported ? [{ label: 'Open official Desktop', value: 'official', hint: officialSession() ? 'claude.ai, next to the gateway one' : 'sign in once with claude.ai' }] : []),
+          { label: 'Connectors…', value: 'connectors', hint: `${names.length} added` },
+          bypassAll()
+            ? { label: 'Permission prompts: off', value: 'perms-ask', hint: 'turn back on (restarts Desktop)' }
+            : { label: 'Permission prompts: on', value: 'perms-bypass', hint: 'bypass for all connectors (restarts Desktop)' },
+        ] : []),
+        { section: 'ccgw' },
+        outdated
+          ? { label: `Update to v${latest}`, value: 'update', hint: `installed v${VERSION}` }
+          : { label: 'Check for updates', value: 'check' },
+        { label: 'Quit', value: 'quit' },
+      ];
+      // Redraw from the top: logo, the last action's output (as much as fits
+      // above the menu), then the panel and items.
+      screen.clear();
+      console.log(title);
+      if (output) {
+        const room = (process.stdout.rows || 40) - title.split('\n').length - header.length - items.length - 8;
+        console.log(lastLines(output, Math.max(room, 8)) + '\n');
       }
-    } catch (e) {
-      if (!(e instanceof CliError)) throw e;
-      console.error(red('✗ ' + e.message));
+      screen.record();
+      const choice = await select(header, items, { initial: last });
+      if (choice === null || choice === 'quit') { screen.stop(); return; }
+      last = items.findIndex((it) => it.value === choice);
+      // The update replaces this process's files; it runs on the normal screen.
+      if (choice === 'update') { screen.leave(); output = ''; await update([]); return; }
+      try {
+        switch (choice) {
+          case 'start': await start([]); break;
+          case 'stop': await stop(); break;
+          case 'restart': await stop({ quiet: true }); await start([]); break;
+          case 'info': printInfo(cfg); break;
+          case 'cred-login': await credential(['login']); break;
+          case 'desktop': await desktopMenu(mode); break;
+          case 'open-gateway': await openGateway(); break;
+          case 'official': await official([]); break;
+          case 'connectors': await connectorMenu(); break;
+          case 'perms-bypass': await permissions(['bypass']); break;
+          case 'perms-ask': await permissions(['ask']); break;
+          case 'check': {
+            const latest = await checkForUpdate({ force: true, timeoutMs: 10000 }).catch((e) => fail(e.message));
+            console.log(isNewer(latest, VERSION)
+              ? `${bold(`ccgw v${latest}`)} is available ${dim(`(installed: v${VERSION}) — pick "Update to v${latest}" below`)}`
+              : green(`✓ ccgw v${VERSION} is up to date`));
+            break;
+          }
+        }
+      } catch (e) {
+        if (!(e instanceof CliError)) throw e;
+        console.error(red('✗ ' + e.message));
+      }
+      output = screen.stop();
     }
-    console.log('');
+  } finally {
+    // Back on the shell's screen, leave the last result where it can be read.
+    screen.leave();
+    if (output.trim()) console.log(output.replace(/\s+$/, ''));
   }
 }
 
