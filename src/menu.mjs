@@ -15,8 +15,8 @@ export const accent = (s) => paint(truecolor ? '38;2;217;119;87' : '38;5;173', s
 // Legacy Windows consoles (conhost without Windows Terminal) lack these glyphs.
 const ascii = process.platform === 'win32' && !process.env.WT_SESSION && process.env.TERM_PROGRAM !== 'vscode';
 const G = ascii
-  ? { pointer: '>', picked: '>', keys: 'up/down move', box: ['+', '+', '+', '+', '-', '|'] }
-  : { pointer: '❯', picked: '›', keys: '↑↓ move', box: ['╭', '╮', '╰', '╯', '─', '│'] };
+  ? { pointer: '>', picked: '>', keys: 'up/down move', box: ['+', '+', '+', '+', '-', '|'], up: '^', down: 'v' }
+  : { pointer: '❯', picked: '›', keys: '↑↓ move', box: ['╭', '╮', '╰', '╯', '─', '│'], up: '↑', down: '↓' };
 
 const visible = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 const width = (s) => [...visible(s)].length;
@@ -49,6 +49,30 @@ export function panel(rows) {
     ...lines.map((l) => ` ${dim(v)} ${pad(l, inner)} ${dim(v)}`),
     dim(` ${bl}${h.repeat(inner + 2)}${br}`),
   ];
+}
+
+// A list taller than the terminal scrolls: only the rows around the cursor
+// are drawn, with a count of those above and below. The window moves only
+// when the cursor would leave it. Everything stays within the terminal's
+// height, so a redraw can always move back up over what it drew.
+function scroller() {
+  let top = 0;
+  return (head, body, at, foot) => {
+    const room = (process.stdout.rows || 24) - 1 - head.length - foot.length;
+    if (body.length <= room || room < 5) { top = 0; return [...head, ...body, ...foot]; }
+    const win = room - 2;
+    if (at < top + 1) top = Math.max(0, at - 1);
+    if (at > top + win - 2) top = Math.min(body.length - win, at - win + 2);
+    top = Math.max(0, Math.min(top, body.length - win));
+    const below = body.length - top - win;
+    return [
+      ...head,
+      top ? dim(`    ${G.up} ${top} more`) : '',
+      ...body.slice(top, top + win),
+      below ? dim(`    ${G.down} ${below} more`) : '',
+      ...foot,
+    ];
+  };
 }
 
 let cursorHidden = false;
@@ -111,15 +135,18 @@ export function select(title, items, { initial = 0 } = {}) {
     const labelW = Math.max(...pickable.map((i) => width(items[i].label)));
     const numbered = pickable.length <= 9;
 
+    const view = scroller();
     const render = () => {
       if (drawn) stdout.write(`${ESC}${drawn}A${ESC}0J`);
-      const lines = [...(Array.isArray(title) ? title : [bold(title)]), ''];
+      const lines = [];
+      let at = 0;
       items.forEach((it, i) => {
         if (it.section) {
           if (i > 0) lines.push('');
           return lines.push(`  ${dim(bold(it.section.toUpperCase()))}`);
         }
         const on = i === cursor;
+        if (on) at = lines.length;
         const n = numbered ? `${pickable.indexOf(i) + 1}  ` : '';
         const label = it.hint ? pad(it.label, labelW) : it.label;
         const hint = it.hint ? `   ${it.disabled ? dim(it.hint) : on ? it.hint : dim(it.hint)}` : '';
@@ -127,9 +154,10 @@ export function select(title, items, { initial = 0 } = {}) {
         else if (on) lines.push(`  ${accent(G.pointer)} ${accent(n)}${bold(accent(label))}${hint}`);
         else lines.push(`    ${dim(n)}${label}${hint}`);
       });
-      lines.push('', dim(`  ${G.keys} · enter select${numbered ? ' · 1-' + pickable.length + ' jump' : ''} · esc back`));
-      stdout.write(lines.map((l) => fit(l)).join('\n') + '\n');
-      drawn = lines.length;
+      const shown = view([...(Array.isArray(title) ? title : [bold(title)]), ''], lines, at,
+        ['', dim(`  ${G.keys} · enter select${numbered ? ' · 1-' + pickable.length + ' jump' : ''} · esc back`)]);
+      stdout.write(shown.map((l) => fit(l)).join('\n') + '\n');
+      drawn = shown.length;
     };
 
     const move = (delta) => {
@@ -137,6 +165,8 @@ export function select(title, items, { initial = 0 } = {}) {
       cursor = enabled[(at + delta + enabled.length) % enabled.length];
       render();
     };
+    // Page and Home/End keys stop at the ends instead of wrapping.
+    const jump = (to) => { cursor = enabled[Math.max(0, Math.min(enabled.length - 1, to))]; render(); };
 
     const done = (value) => {
       stdin.removeListener('keypress', onKey);
@@ -153,6 +183,10 @@ export function select(title, items, { initial = 0 } = {}) {
       if (key.ctrl && key.name === 'c') return done(null);
       if (key.name === 'up' || key.name === 'k') return move(-1);
       if (key.name === 'down' || key.name === 'j' || key.name === 'tab') return move(1);
+      if (key.name === 'pageup') return jump(enabled.indexOf(cursor) - 10);
+      if (key.name === 'pagedown') return jump(enabled.indexOf(cursor) + 10);
+      if (key.name === 'home') return jump(0);
+      if (key.name === 'end') return jump(enabled.length - 1);
       if (key.name === 'return' || key.name === 'enter') return done(items[cursor].value);
       if (key.name === 'escape' || key.name === 'q' || key.name === 'left') return done(null);
       // number keys pick the n-th item, as numbered on screen
@@ -188,23 +222,27 @@ export function checklist(title, items) {
     const labelW = Math.max(...pickable.map((i) => width(items[i].label)));
     const box = (on) => (ascii ? (on ? '[x]' : '[ ]') : on ? '◉' : '○');
 
+    const view = scroller();
     const render = () => {
       if (drawn) stdout.write(`${ESC}${drawn}A${ESC}0J`);
-      const lines = [...(Array.isArray(title) ? title : [bold(title)]), ''];
+      const lines = [];
+      let at = 0;
       items.forEach((it, i) => {
         if (it.section) {
           if (i > 0) lines.push('');
           return lines.push(`  ${dim(bold(it.section.toUpperCase()))}`);
         }
         const on = i === cursor;
+        if (on) at = lines.length;
         const mark = ticked.has(i) ? accent(box(true)) : dim(box(false));
         const label = it.hint ? pad(it.label, labelW) : it.label;
         const hint = it.hint ? `   ${dim(it.hint)}` : '';
         lines.push(`  ${on ? accent(G.pointer) : ' '} ${mark} ${on ? bold(accent(label)) : label}${hint}`);
       });
-      lines.push('', dim(`  ${G.keys} · space tick · a all/none · enter confirm (${ticked.size} ticked) · esc back`));
-      stdout.write(lines.map((l) => fit(l)).join('\n') + '\n');
-      drawn = lines.length;
+      const shown = view([...(Array.isArray(title) ? title : [bold(title)]), ''], lines, at,
+        ['', dim(`  ${G.keys} · space tick · a all/none · enter confirm (${ticked.size} ticked) · esc back`)]);
+      stdout.write(shown.map((l) => fit(l)).join('\n') + '\n');
+      drawn = shown.length;
     };
 
     const done = (value) => {
@@ -223,6 +261,8 @@ export function checklist(title, items) {
       const at = pickable.indexOf(cursor);
       if (key.name === 'up' || key.name === 'k') { cursor = pickable[(at - 1 + pickable.length) % pickable.length]; return render(); }
       if (key.name === 'down' || key.name === 'j' || key.name === 'tab') { cursor = pickable[(at + 1) % pickable.length]; return render(); }
+      const to = { pageup: at - 10, pagedown: at + 10, home: 0, end: pickable.length - 1 }[key.name];
+      if (to !== undefined) { cursor = pickable[Math.max(0, Math.min(pickable.length - 1, to))]; return render(); }
       if (key.name === 'space') { ticked.has(cursor) ? ticked.delete(cursor) : ticked.add(cursor); return render(); }
       if (str === 'a') { if (ticked.size === pickable.length) ticked.clear(); else pickable.forEach((i) => ticked.add(i)); return render(); }
       if (key.name === 'return' || key.name === 'enter') return done(pickable.filter((i) => ticked.has(i)).map((i) => items[i].value));
