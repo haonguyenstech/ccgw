@@ -19,7 +19,7 @@ import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/up
 import {
   IS_WIN, sleep, findClaude, claudeAuthStatus, copyToClipboard,
   desktop3pDir, desktopSupported, quitDesktop, openDesktop, desktopRunning,
-  officialSupported, officialDir, officialRunning, openOfficial, quitOfficial,
+  officialSupported, officialDir, officialDirCandidates, officialProcDirs, officialRunning, openOfficial, quitOfficial,
 } from '../src/platform.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -1238,21 +1238,34 @@ async function officialApi() {
     if (await api.projects().then(() => true, () => false)) return api;
   }
   let jar;
+  let dir = OFFICIAL_DIR;
+  // Desktop's data dir on Windows depends on how it was installed; when the
+  // guess holds no sign-in, try the other one and the running instance's own.
+  const read = async () => {
+    try { return await officialCookies(dir); } catch (e) {
+      if (e.code !== 'NOCOOKIES' || !IS_WIN) throw e;
+      const others = officialDirCandidates(officialProcDirs()).filter((d) => d !== path.resolve(dir));
+      for (const d of others) {
+        try { const j = await officialCookies(d); dir = d; return j; } catch (err) { if (err.code !== 'NOCOOKIES') { dir = d; throw err; } }
+      }
+      throw Object.assign(new Error(`the official Desktop has no sign-in yet: no Cookies file in ${[dir, ...others].join(' or ')} (ccgw desktop official)`), { code: 'NOCOOKIES' });
+    }
+  };
   try {
-    jar = await officialCookies(OFFICIAL_DIR);
+    jar = await read();
   } catch (e) {
     if (e.code !== 'EBUSY') throw e;
     console.log(dim('The official Desktop locks its sign-in file while open, so it closes for a moment (it stays signed in)…'));
     await quitOfficial();
     try {
       for (let i = 0; ; i++) {
-        try { jar = await officialCookies(OFFICIAL_DIR); break; } catch (err) { if (err.code !== 'EBUSY' || i >= 10) throw err; await sleep(500); }
+        try { jar = await officialCookies(dir); break; } catch (err) { if (err.code !== 'EBUSY' || i >= 10) throw err; await sleep(500); }
       }
     } finally {
       if (!(await startOfficial())) console.log(dim('  (could not reopen the official Desktop — ccgw desktop official)'));
     }
   }
-  if (IS_WIN) cacheSession(OFFICIAL_DIR, SESSION_CACHE, jar);
+  if (IS_WIN) cacheSession(dir, SESSION_CACHE, jar);
   return claudeAi(jar);
 }
 const OUTSIDE = '__chats__';

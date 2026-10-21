@@ -98,17 +98,31 @@ export const officialSupported = IS_MAC || IS_WIN;
 
 export function officialDir() {
   if (FAKE_DESKTOP) return path.join(process.env.CCGW_DESKTOP_DIR, 'official', 'Claude-Official');
-  if (IS_WIN) {
-    // MSIX keeps the app's %APPDATA% in the package's LocalCache.
-    const pkgs = path.join(process.env.LOCALAPPDATA || '', 'Packages');
-    try {
-      const fam = fs.readdirSync(pkgs).find((d) => /^Claude_[a-z0-9]+$/i.test(d));
-      const virt = fam && path.join(pkgs, fam, 'LocalCache', 'Roaming', 'Claude');
-      if (virt && fs.existsSync(virt)) return virt;
-    } catch {}
-    return path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Claude');
-  }
+  if (IS_WIN) return officialDirCandidates()[0] || path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Claude');
   return path.join(os.homedir(), 'Library', 'Application Support', 'Claude-Official');
+}
+
+// Windows: MSIX builds that virtualize %APPDATA% keep it in the package's
+// LocalCache; others (and the exe installer) write the real one. An old
+// LocalCache copy can outlive a switch between the two, so the dirs come
+// newest sign-in first, then the one Desktop has written to last. `extra`
+// adds dirs seen on running official processes.
+export function officialDirCandidates(extra = []) {
+  if (!IS_WIN || FAKE_DESKTOP) return [officialDir()];
+  const real = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Claude');
+  const pkgs = path.join(process.env.LOCALAPPDATA || '', 'Packages');
+  let virt = null;
+  try {
+    const fam = fs.readdirSync(pkgs).find((d) => /^Claude_[a-z0-9]+$/i.test(d));
+    if (fam) virt = path.join(pkgs, fam, 'LocalCache', 'Roaming', 'Claude');
+  } catch {}
+  const mtime = (f) => { try { return fs.statSync(f).mtimeMs; } catch { return 0; } };
+  const score = (d) => [
+    Math.max(mtime(path.join(d, 'Network', 'Cookies')), mtime(path.join(d, 'Cookies'))),
+    Math.max(mtime(path.join(d, 'config.json')), mtime(path.join(d, 'Local State'))),
+  ];
+  const dirs = [...new Set([virt, real, ...extra].filter((d) => d && fs.existsSync(d)).map((d) => path.resolve(d)))];
+  return dirs.map((d) => ({ d, s: score(d) })).sort((a, b) => (b.s[0] - a.s[0]) || (b.s[1] - a.s[1])).map((x) => x.d);
 }
 
 // Main Desktop processes, tagged with whether they are the official instance.
@@ -156,6 +170,8 @@ const officialPids = () => desktopProcs().filter((p) => p.official).map((p) => p
 
 export const desktopRunning = () => desktopPids().length > 0;
 export const officialRunning = () => officialPids().length > 0;
+// The data dirs the running official instance was started with (Windows).
+export const officialProcDirs = () => desktopProcs().filter((p) => p.official && p.dir).map((p) => p.dir.trim());
 
 // Brings a running instance forward by pid. Starting Desktop again is no way
 // to do that: it does not hold a single-instance lock per data dir, so a

@@ -90,7 +90,7 @@ const COOKIE_SQL = "select name, hex(encrypted_value) as v from cookies where ho
 // its cookie file exclusively there.
 export async function officialCookies(officialDir) {
   const dir = [path.join(officialDir, 'Network'), officialDir].find((d) => fs.existsSync(path.join(d, 'Cookies')));
-  if (!dir) throw new Error('the official Desktop has no sign-in yet (ccgw desktop official)');
+  if (!dir) throw Object.assign(new Error(`the official Desktop has no sign-in yet: no Cookies file in ${officialDir} (ccgw desktop official)`), { code: 'NOCOOKIES' });
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'ccgw-cookies-'));
   try {
     for (const f of ['Cookies', 'Cookies-journal', 'Cookies-wal']) {
@@ -111,7 +111,7 @@ export async function officialCookies(officialDir) {
     }
     const jar = {};
     for (const { name, v } of rows) jar[name] = cookieText(decrypt(Buffer.from(v, 'hex'), officialDir));
-    if (!jar.sessionKey) throw new Error('the official Desktop is not signed in (ccgw desktop official --sign-in)');
+    if (!jar.sessionKey) throw new Error(`the official Desktop is not signed in: no claude.ai sessionKey cookie in ${dir} (ccgw desktop official --sign-in)`);
     return jar;
   } catch (e) {
     if (e.code === 'EBUSY' || e.code === 'EPERM') throw Object.assign(new Error('the official Desktop holds its sign-in file'), { code: 'EBUSY' });
