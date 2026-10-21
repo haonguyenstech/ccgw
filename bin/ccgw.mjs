@@ -12,7 +12,8 @@ import { installFigma, serveFigma, figmaStatus, registerPlugin, pluginRegistered
 import { latestVersion, requirements, supportsPlatform, refigmaEntry, entryVersion, probe, findPython, installPython } from '../src/refigma.mjs';
 import { interactive, select, checklist, prompt, panel, accent, screen, lastLines } from '../src/menu.mjs';
 import { syncSupported, officialCookies, cachedSession, cacheSession, claudeAi, gatewayStore, writeSession, removeSession, sessionUntouched, sessionExists, writeSpace, officialSkills, installSkills, installedSkills,
-  gatewaySessions, gatewaySpaces, transcriptMarkdown, chatDocName, gatewayUserSkills, zipSkill, unzipSkill } from '../src/sync.mjs';
+  gatewaySessions, gatewaySpaces, transcriptMarkdown, chatDocName, gatewayUserSkills, zipSkill, unzipSkill,
+  readTurns, continuedTurns, unansweredQuestion, handoffFacts, briefPrompt, handoffDoc, handoffDocName, looksVietnamese } from '../src/sync.mjs';
 import { logo } from '../src/logo.mjs';
 import { provider, claudeToken, timeLeft, statusLine, loginRunning, openLogin } from '../src/credential.mjs';
 import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/update.mjs';
@@ -782,6 +783,28 @@ function officialSession() {
   return conf.lastKnownAccountUuid ? `${conf.lastKnownAccountUuid}:${JSON.stringify(conf['oauth:tokenCacheV2'] ?? conf['oauth:tokenCache'] ?? '')}` : null;
 }
 
+// While a Windows sign-in holds the mode at "1p", a marker names the process
+// holding it. If that process dies without putting "3p" back (a closed
+// terminal, a kill), the next ccgw command does, or the gateway Desktop would
+// next open on claude.ai.
+const MODE_HOLD = path.join(HOME_DIR, 'mode-hold.json');
+function holdMode1p() {
+  writeJson(MODE_HOLD, { pid: process.pid, since: new Date().toISOString() });
+  setMode('1p');
+  process.once('exit', () => { if (readJson(MODE_HOLD, null)?.pid === process.pid) releaseModeHold(); });
+}
+function releaseModeHold() {
+  setMode('3p');
+  fs.rmSync(MODE_HOLD, { force: true });
+}
+function releaseStaleModeHold() {
+  const hold = readJson(MODE_HOLD, null);
+  if (!hold) return;
+  try { process.kill(hold.pid, 0); return; } catch {}
+  if (getMode() === '1p') { releaseModeHold(); console.log(dim('(put Claude Desktop back in gateway mode: an official sign-in was cut off)')); }
+  else fs.rmSync(MODE_HOLD, { force: true });
+}
+
 // On Windows both instances read the mode from the gateway's Claude-3p dir,
 // and only at startup: it says "1p" just while the official one starts.
 async function startOfficial() {
@@ -809,7 +832,17 @@ async function official(args) {
   }
 
   const before = officialSession();
-  const signIn = args.includes('--sign-in') || !before;
+  let signIn = args.includes('--sign-in') || !before;
+  // Already signed in: waiting for a new session would wait out the full
+  // timeout (holding Windows' mode at "1p" all along) unless the user really
+  // means to switch accounts.
+  if (before && args.includes('--sign-in')) {
+    signIn = interactive() && await select(`The official Desktop is already signed in ${dim('(claude.ai)')}`, [
+      { label: 'Just open it', value: false },
+      { label: 'Sign in again (another account)', value: true, hint: 'sign out in its window first' },
+    ]);
+    if (!signIn) console.log(dim('Already signed in, so it only opens. To switch accounts: sign out in its window, then ccgw desktop official --sign-in.'));
+  }
   console.log(dim(officialRunning() ? 'Bringing the official Claude Desktop forward…' : 'Opening the official Claude Desktop…'));
   if (!signIn || (officialRunning() && !args.includes('--sign-in'))) {
     if (!(await startOfficial())) fail('could not start the official Claude Desktop');
@@ -825,14 +858,14 @@ async function official(args) {
   const holdMode = IS_WIN && getMode() === '3p';
   const gatewayWasUp = !IS_WIN && desktopRunning();
   const reopen = async () => {
-    if (holdMode) setMode('3p');
+    if (holdMode) releaseModeHold();
     if (gatewayWasUp && !(await openDesktop())) console.log(dim('  (could not reopen the gateway Claude Desktop — start it with `ccgw desktop gateway`)'));
   };
   if (gatewayWasUp) {
     console.log(dim('The browser returns from sign-in to whichever Desktop macOS picks, so the gateway one is closed until you are signed in.'));
     await quitDesktop();
   }
-  if (holdMode) setMode('1p');
+  if (holdMode) holdMode1p();
   if (!(await (holdMode ? openOfficial() : startOfficial()))) { await reopen(); fail('could not start the official Claude Desktop'); }
   console.log(`${bold('Sign in')} in the Claude window that just opened ${dim('— waiting (Ctrl+C to stop waiting)')}`);
 
@@ -921,6 +954,10 @@ function help() {
   ccgw connector list --official | remove <name> --official
   ccgw sync [--project <name>]… [--all-projects] [--chats] [--skills] [--all] [--since <days>]   copy claude.ai chats, projects and skills from the official Desktop into the gateway one
   ccgw sync --to-official [same options]   the other way: gateway projects → claude.ai projects, chats as Markdown in their knowledge, your skills uploaded
+  ccgw handoff [--chat <title|id>]… [--all] [--gateway-chats] [--list] [--model <name>] [--no-brief]
+                               chats synced from claude.ai and continued in the gateway → their claude.ai project: a note
+                               Claude Code writes (done, decisions, next step) + the whole continuation
+                               (--gateway-chats: also chats started in the gateway)
   ccgw permissions bypass [name]   skip Desktop's "Claude wants to use …" prompts (all connectors, or one)
   ccgw permissions ask [name]      prompt again;  ccgw permissions  shows the current setting
   ccgw connector add gmail --client-json <file>   Gmail via your Google OAuth client (runs locally)
@@ -995,6 +1032,7 @@ function rotateKey() {
 }
 
 async function run(cmd, args) {
+  if (IS_WIN) releaseStaleModeHold();
   switch (cmd) {
     case 'start': return start(args);
     case 'stop': return stop();
@@ -1007,6 +1045,7 @@ async function run(cmd, args) {
     case 'desktop': return desktop(args);
     case 'connector': case 'connectors': return connector(args);
     case 'sync': return sync(args);
+    case 'handoff': return handoff(args);
     case 'gmail': return gmail(args);
     case 'figma': return figma(args);
     case 'permissions': case 'perms': return permissions(args);
@@ -1065,6 +1104,7 @@ async function menu() {
           ...(officialSupported && syncSupported ? [
             { label: 'Sync from official…', value: 'sync', hint: 'claude.ai chats, projects, skills → gateway' },
             { label: 'Sync to official…', value: 'sync-out', hint: 'gateway projects, chats, skills → claude.ai' },
+            { label: 'Hand off to official…', value: 'handoff', hint: 'chats continued here → claude.ai project, with a note' },
           ] : []),
           bypassAll()
             ? { label: 'Permission prompts: off', value: 'perms-ask', hint: 'turn back on (restarts Desktop)' }
@@ -1103,6 +1143,7 @@ async function menu() {
           case 'connectors': await connectorMenu(); break;
           case 'sync': await sync([]); break;
           case 'sync-out': await sync(['--to-official']); break;
+          case 'handoff': await handoff([]); break;
           case 'perms-bypass': await permissions(['bypass']); break;
           case 'perms-ask': await permissions(['ask']); break;
           case 'check': {
@@ -1407,6 +1448,32 @@ async function sync(args) {
 // What came from claude.ai is never sent back.
 const GATEWAY_CHATS = 'Gateway chats';
 
+// The claude.ai project for a gateway one (or OUTSIDE, for "Gateway chats"):
+// the one it came from, the one made last time (unless deleted since), or a
+// new one.
+function remoteProjectFor(api, state, remoteProjects, onCreate = () => {}) {
+  const out = state.toOfficial ??= { projects: {}, chats: {}, skills: [] };
+  const origin = Object.fromEntries(Object.entries(state.projects).map(([remote, space]) => [space, remote]));
+  const exists = async (id) => !!id && (remoteProjects.some((p) => p.uuid === id) || !!(await api.project(id).catch(() => null)));
+  return async (key, name, instructions) => {
+    if (await exists(origin[key])) return origin[key];
+    if (await exists(out.projects[key])) return out.projects[key];
+    const p = await api.createProject(name, 'From the gateway Claude Desktop (Claude Code), copied by ccgw sync.');
+    if (instructions) await api.setInstructions(p.uuid, instructions);
+    out.projects[key] = p.uuid;
+    remoteProjects.push(p);
+    onCreate(p);
+    return p.uuid;
+  };
+}
+
+const instructionsOf = (sp) => {
+  for (const f of sp?.folders || []) {
+    try { return fs.readFileSync(path.join(f.path, 'Project instructions.md'), 'utf8'); } catch {}
+  }
+  return '';
+};
+
 async function syncToOfficial(args) {
   const listOnly = args.includes('--list');
   const since = flag(args, '--since');
@@ -1467,25 +1534,8 @@ async function syncToOfficial(args) {
     fail('usage: ccgw sync --to-official [--project <name>]… [--all-projects] [--chats] [--skills] [--all] [--since <days>] [--list]');
   }
 
-  // The claude.ai project for a gateway one: its origin, the one made last
-  // time (unless deleted since), or a new one.
-  const exists = async (id) => !!id && (remoteProjects.some((p) => p.uuid === id) || !!(await api.project(id).catch(() => null)));
   const counts = { projects: 0, chats: 0, failed: 0, skills: 0 };
-  const projectFor = async (key, name, instructions) => {
-    if (await exists(origin[key])) return origin[key];
-    if (await exists(out.projects[key])) return out.projects[key];
-    const p = await api.createProject(name, 'From the gateway Claude Desktop (Claude Code), copied by ccgw sync.');
-    if (instructions) await api.setInstructions(p.uuid, instructions);
-    out.projects[key] = p.uuid;
-    counts.projects++;
-    return p.uuid;
-  };
-  const instructionsOf = (sp) => {
-    for (const f of sp.folders || []) {
-      try { return fs.readFileSync(path.join(f.path, 'Project instructions.md'), 'utf8'); } catch {}
-    }
-    return '';
-  };
+  const projectFor = remoteProjectFor(api, state, remoteProjects, () => counts.projects++);
 
   const groups = [
     ...spaces.filter((sp) => picked.includes(sp.id)).map((sp) => ({ key: sp.id, name: sp.name, instructions: instructionsOf(sp), chats: inSpace(sp.id) })),
@@ -1534,6 +1584,173 @@ async function syncToOfficial(args) {
   ].filter(Boolean).join(', ')})`));
   console.log(dim('  Chats are Markdown files in each project\'s knowledge: open the project on claude.ai and ask Claude to pick one up.'));
 }
+
+// ---------------------------------------------------------------- handoff back to the official Desktop
+
+// A chat copied from claude.ai and continued in the gateway (claude.ai ran
+// out of usage, say) cannot be put back: claude.ai takes in no chat history.
+// So what happened after the copy goes to the chat's claude.ai project as one
+// knowledge file: a note Claude Code writes from it (goal, done, decisions,
+// state, still to do, next step), what it touched, the files it produced and
+// the whole continuation. A new chat in that project picks up from there.
+// Chats started in the gateway are handed off the same way.
+
+// The note, by the same Claude Code login the gateway uses: no tools, no
+// settings, its own system prompt, run from a fixed empty dir so neither a
+// repo's git status or CLAUDE.md nor a new ~/.claude/projects entry per run
+// comes into it.
+function writeBrief({ system, user }, model) {
+  const claude = process.env.CCGW_HANDOFF_CLAUDE || findClaude(readConfig().claudePath);
+  if (!claude) throw new Error('Claude Code (claude) is not installed');
+  const [cmd, pre] = claude.endsWith('.js') || claude.endsWith('.mjs') ? [process.execPath, [claude]] : [claude, []];
+  const env = { ...process.env };
+  delete env.CLAUDECODE; // run from inside Claude Code, it would refuse to nest
+  const cwd = path.join(HOME_DIR, 'handoff');
+  fs.mkdirSync(cwd, { recursive: true });
+  const r = spawnSync(cmd, [...pre, '-p', '--model', model, '--output-format', 'text', '--system-prompt', system,
+    '--tools=', '--setting-sources=', '--strict-mcp-config', '--no-session-persistence'], {
+    input: user, encoding: 'utf8', env, cwd, timeout: 300_000, maxBuffer: 16 << 20, windowsHide: true,
+  });
+  if (r.error) throw new Error(r.error.code === 'ETIMEDOUT' ? 'Claude Code took more than 5 minutes' : r.error.message);
+  const text = (r.stdout || '').trim();
+  if (r.status !== 0 || !text) throw new Error((r.stderr || text || `claude exited with ${r.status}`).trim().split('\n').pop());
+  return text;
+}
+
+async function handoff(args) {
+  if (!syncSupported || !officialSupported) fail('ccgw handoff needs macOS or Windows.');
+  const listOnly = args.includes('--list');
+  const model = flag(args, '--model') || 'sonnet';
+  const named = args.flatMap((a, i) => (a === '--chat' ? [String(args[i + 1] || '').toLowerCase()] : [])).filter(Boolean);
+  let store;
+  try { store = gatewayStore(desktop3pDir()); } catch (e) { fail(e.message); }
+
+  console.log(dim(`Signing in to claude.ai as the official Desktop${IS_WIN ? '' : ' (macOS may ask for the "Claude Safe Storage" Keychain item: click Allow)'}…`));
+  let api, remoteProjects, convs;
+  try {
+    api = await officialApi();
+    [remoteProjects, convs] = await Promise.all([api.projects(), api.conversations()]);
+  } catch (e) {
+    fail(e.message);
+  }
+  convs = new Map(convs.map((c) => [c.uuid, c]));
+
+  const state = readJson(SYNC_FILE, { conversations: {}, projects: {} });
+  const done = state.handoff ??= {};
+  const copied = new Map(Object.entries(state.conversations).map(([conv, rec]) => [rec.session, { conv, rec }]));
+  const spaces = gatewaySpaces(store);
+  const origin = Object.fromEntries(Object.entries(state.projects).map(([remote, space]) => [space, remote]));
+  const remoteName = (id) => remoteProjects.find((p) => p.uuid === id)?.name;
+  // Copies nobody chatted on in are left out: claude.ai already has all of them.
+  const items = gatewaySessions(store).flatMap((s) => {
+    const from = copied.get(s.session);
+    if (from && sessionUntouched(store, from.rec)) return [];
+    const conv = from && convs.get(from.conv);
+    const sp = spaces.find((x) => x.id === s.spaceId);
+    const target = conv?.project_uuid && remoteName(conv.project_uuid)
+      ? { id: conv.project_uuid, name: remoteName(conv.project_uuid) }
+      : sp ? { key: sp.id, name: remoteName(origin[sp.id]) || remoteName(state.toOfficial?.projects?.[sp.id]) || sp.name, instructions: instructionsOf(sp) }
+        : { key: OUTSIDE, name: remoteName(state.toOfficial?.projects?.[OUTSIDE]) || GATEWAY_CHATS };
+    return [{ s, from, conv, target, pending: done[s.session]?.size !== s.size }];
+  });
+  const nothingToHandOff = () => {
+    const mineWaiting = items.filter((it) => it.pending && !it.from).length;
+    console.log(green('✓ nothing to hand off') + dim('  — no chat synced from claude.ai has been continued in the gateway since its last handoff.'));
+    console.log(dim('  Handoff is for this: sync a claude.ai chat to the gateway (Sync from official), chat on in it there, then hand it off.'));
+    if (mineWaiting && !args.includes('--gateway-chats')) console.log(dim(`  ${plural(mineWaiting, 'chat')} started in the gateway can go too: ccgw handoff --gateway-chats`));
+  };
+  const hint = (it) => `${it.from ? 'continued from claude.ai' : 'started in the gateway'} → "${it.target.name}"${it.pending ? '' : ' · handed off, unchanged'}`;
+
+  if (listOnly) {
+    if (!items.length) return console.log(dim('Nothing to hand off: no chat was continued or started in the gateway.'));
+    for (const it of items) console.log(`  ${dim(it.s.session.slice(6, 14))}  ${(it.pending ? cyan : dim)(short(it.s.title, 40).padEnd(40))} ${dim(hint(it))}`);
+    return;
+  }
+
+  let picked;
+  if (named.length) {
+    // Each --chat names one chat: its title, the start of its title, or the
+    // id `--list` shows; several chats can share a title.
+    picked = [];
+    for (const n of named) {
+      const id = items.filter((it) => it.s.session.slice(6).startsWith(n));
+      const exact = items.filter((it) => it.s.title.toLowerCase() === n);
+      const part = items.filter((it) => it.s.title.toLowerCase().includes(n));
+      const hits = n.length >= 4 && id.length ? id : exact.length ? exact : part;
+      if (!hits.length) fail(`no gateway chat titled like "${n}" (ccgw handoff --list)`);
+      if (hits.length > 1) fail(`"${n}" matches ${hits.length} chats; name one by its id:\n${hits.map((it) => `  ${it.s.session.slice(6, 14)}  ${it.s.title}  ${dim(hint(it))}`).join('\n')}`);
+      if (!picked.includes(hits[0])) picked.push(hits[0]);
+    }
+  } else if (args.includes('--all')) picked = items.filter((it) => it.pending && (it.from || args.includes('--gateway-chats')));
+  else if (interactive()) {
+    // The point is chats that came from claude.ai and went on here; chats
+    // that only ever lived in the gateway are offered with --gateway-chats.
+    const withMine = args.includes('--gateway-chats');
+    const pend = items.filter((it) => it.pending && (it.from || withMine));
+    if (!pend.length) return nothingToHandOff();
+    const cont = pend.filter((it) => it.from), mine = pend.filter((it) => !it.from);
+    const ids = await checklist(`${bold('Hand off to the official Desktop')}  ${dim('gateway → claude.ai project · a note + the whole continuation')}`, [
+      ...(cont.length ? [{ section: 'Continued from claude.ai' }, ...cont.map((it) => ({ label: short(it.s.title, 48), value: it.s.session, hint: `→ "${it.target.name}"` }))] : []),
+      ...(mine.length ? [{ section: 'Started in the gateway' }, ...mine.map((it) => ({ label: short(it.s.title, 48), value: it.s.session, hint: `→ "${it.target.name}"` }))] : []),
+    ], { verb: 'hand off' });
+    if (!ids) return console.log(dim('Handoff cancelled.'));
+    picked = pend.filter((it) => ids.includes(it.s.session));
+  } else {
+    fail('usage: ccgw handoff [--chat <title|id>]… [--all] [--gateway-chats] [--list] [--model <name>] [--no-brief]');
+  }
+  if (!picked.length) return named.length || interactive() ? console.log(dim('Nothing picked.')) : nothingToHandOff();
+
+  const projectFor = remoteProjectFor(api, state, remoteProjects);
+  const results = [];
+  for (const it of picked) {
+    const { s } = it;
+    try {
+      // Copies made before 0.3.21 do not record where they end; the chat's
+      // unanswered last question, if any, still belongs to claude.ai.
+      const lastHuman = it.from && !it.from.rec.leaf ? await api.conversation(it.from.conv).then(unansweredQuestion, () => null) : null;
+      const turns = readTurns(s);
+      // A copy sync later made again alongside (because this one was continued)
+      // has lost its record, but its claude.ai part is still marked.
+      const { before, after } = it.from || turns.some((x) => x.claudeAi) ? continuedTurns(turns, it.from?.rec, lastHuman) : { before: [], after: turns };
+      if (!after.length) { console.log(dim(`  ${s.title}: nothing after the claude.ai part, skipped`)); continue; }
+      const facts = handoffFacts(s, after);
+      let brief = null;
+      if (!args.includes('--no-brief')) {
+        console.log(dim(`  ${s.title}: Claude Code (${model}) is writing the handoff note…`));
+        try { brief = writeBrief(briefPrompt({ title: s.title, before, after, facts }), model); } catch (e) {
+          console.log(`  ${red('!')} no note for "${s.title}": ${e.message} ${dim('(the transcript still goes; check `claude auth status`, or --no-brief)')}`);
+        }
+      }
+      const project = it.target.id || await projectFor(it.target.key, it.target.name, it.target.instructions);
+      const prev = done[s.session];
+      if (prev?.doc) await api.deleteDoc(prev.project, prev.doc);
+      const name = handoffDocName(s);
+      const doc = await api.addDoc(project, name, handoffDoc({ s, conv: it.conv, after, facts, brief, model }));
+      done[s.session] = { project, doc: doc.uuid, size: s.size, at: new Date().toISOString() };
+      writeJson(SYNC_FILE, state);
+      results.push({ it, project, name, brief: !!brief, vi: looksVietnamese(turns) });
+      console.log(`  ${green('✓')} ${s.title} ${dim(`→ "${remoteName(project) || it.target.name}" · ${plural(after.filter((x) => x.who === 'You').length, 'message')} from you, ${plural(facts.files.length, 'file')} edited, ${plural(facts.outputs.length, 'output')}${brief ? ', note' : ''}`)}`);
+    } catch (e) {
+      console.log(`  ${red('✗')} ${s.title}: ${e.message}`);
+    }
+  }
+  if (!results.length) return;
+
+  // What to say in the new claude.ai chat, in the user's language.
+  const starter = (r) => (r.vi
+    ? `Đọc file "${r.name}" trong knowledge của project này (phần mình đã làm tiếp bên Claude Code), rồi làm tiếp từ bước tiếp theo ghi trong đó.`
+    : `Read "${r.name}" in this project's knowledge (what I did in Claude Code after this project's chat), then carry on from the next step it names.`);
+  console.log('');
+  console.log(green(`✓ handed off ${plural(results.length, 'chat')} to claude.ai`));
+  for (const p of [...new Set(results.map((r) => r.project))]) {
+    console.log(`  ${bold(remoteName(p) || 'project')}  ${dim(`https://claude.ai/project/${p}`)}`);
+    for (const r of results.filter((x) => x.project === p)) console.log(`    ${dim('start a new chat with:')} ${starter(r)}`);
+  }
+  if (results.length === 1 && !process.env.CCGW_NO_CLIPBOARD && copyToClipboard(starter(results[0]))) console.log(dim('  (that line is on the clipboard)'));
+  console.log(dim('  Open the project in the official Desktop (ccgw desktop official) and paste it into a new chat there.'));
+}
+
+const short = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 const [cmd, ...args] = process.argv.slice(2);
 const command = cmd ?? (interactive() ? 'menu' : 'help');

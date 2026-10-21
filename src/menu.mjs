@@ -213,7 +213,8 @@ export function select(title, items, { initial = 0 } = {}) {
 // Ctrl+C. Space ticks, a ticks or clears all, enter confirms; with nothing
 // ticked, enter takes the highlighted item, as a one-item pick would.
 // items: [{ label, value, hint?, checked? } | { section: 'NAME' }]
-export function checklist(title, items) {
+// verb: what enter does, for the key line ("sync", "hand off").
+export function checklist(title, items, { verb = 'sync' } = {}) {
   return new Promise((resolve) => {
     const { stdin, stdout } = process;
     const pickable = items.map((it, i) => (it.section ? -1 : i)).filter((i) => i >= 0);
@@ -241,7 +242,7 @@ export function checklist(title, items) {
         lines.push(`  ${on ? accent(G.pointer) : ' '} ${mark} ${on ? bold(accent(label)) : label}${hint}`);
       });
       const shown = view([...(Array.isArray(title) ? title : [bold(title)]), ''], lines, at,
-        ['', dim(`  ${G.keys} · space tick · a all/none · enter ${ticked.size ? `sync ${ticked.size} ticked` : 'sync the highlighted one'} · esc back`)]);
+        ['', dim(`  ${G.keys} · space tick · a all/none · enter ${ticked.size ? `${verb} ${ticked.size} ticked` : `${verb} the highlighted one`} · esc back`)]);
       stdout.write(shown.map((l) => fit(l)).join('\n') + '\n');
       drawn = shown.length;
     };

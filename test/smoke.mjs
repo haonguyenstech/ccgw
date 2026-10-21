@@ -199,6 +199,42 @@ try {
     inst2.plugins['my-plugin@local-desktop-app-uploads'] = [{ scope: 'user', installPath: up }];
     fs.writeFileSync(ifile, JSON.stringify(inst2));
     check('to-official finds the user\'s skills, not the copied ones', JSON.stringify(S.gatewayUserSkills(store).map((x) => x.name)) === '["mine"]');
+
+    // handoff: a claude.ai chat that ran out on an unanswered question, then
+    // went on in the gateway with tool calls and an output file.
+    const cut = { ...conv, uuid: 'c2', current_leaf_message_uuid: 'm5', chat_messages: [...conv.chat_messages,
+      { uuid: 'm5', parent_message_uuid: 'm4', sender: 'human', index: 5, created_at: '2026-10-15T07:06:05Z', content: [{ type: 'text', text: 'làm tiếp phần login đi' }] }] };
+    const hrec = S.writeSession(store, cut, { space });
+    const hs = S.gatewaySessions(store).find((x) => x.session === hrec.session);
+    const tfile = path.join(hs.dir, '.claude/projects/session', `${hs.cli}.jsonl`);
+    const line = (o) => fs.appendFileSync(tfile, JSON.stringify(o) + '\n');
+    line({ type: 'assistant', uuid: 'g1', timestamp: '2026-10-16T01:00:00Z', message: { id: 'msg_01', role: 'assistant', content: [
+      { type: 'thinking', thinking: 'secret' }, { type: 'text', text: 'Dùng JWT.' },
+      { type: 'tool_use', name: 'Write', input: { file_path: '/w/auth.ts', content: 'x' } },
+      { type: 'tool_use', name: 'Bash', input: { command: 'npm test' } }] } });
+    line({ type: 'user', uuid: 'g2', timestamp: '2026-10-16T01:00:01Z', message: { role: 'user', content: [{ type: 'tool_result', content: 'ok' }] } });
+    line({ type: 'user', uuid: 'g3', timestamp: '2026-10-16T01:01:00Z', message: { role: 'user', content: 'quên mật khẩu để sau' } });
+    fs.mkdirSync(path.join(hs.dir, 'outputs', 'docs'), { recursive: true });
+    fs.writeFileSync(path.join(hs.dir, 'outputs', 'docs', 'plan.md'), '# Plan\n```js\nx\n```\n');
+    fs.writeFileSync(path.join(hs.dir, 'outputs', 'logo.png'), Buffer.from([0x89, 0x50, 0, 1]));
+    const turns = S.readTurns(hs);
+    const split = S.continuedTurns(turns, hrec);
+    check('handoff splits at the copy\'s end, keeping the unanswered question on claude.ai', split.before.at(-1)?.text === 'làm tiếp phần login đi'
+      && split.after[0]?.text === 'Dùng JWT.' && split.after.at(-1)?.text === 'quên mật khẩu để sau' && !JSON.stringify(split).includes('secret'));
+    const legacy = S.continuedTurns(turns, { session: hrec.session }, S.unansweredQuestion(cut));
+    check('handoff splits copies made before leaf was recorded', legacy.before.length === split.before.length && legacy.after.length === split.after.length
+      && S.unansweredQuestion(conv) === null);
+    const facts = S.handoffFacts(hs, split.after);
+    check('handoff facts', JSON.stringify(facts.files) === '["/w/auth.ts"]' && facts.commands[0] === 'npm test'
+      && facts.outputs.find((o) => o.path === 'docs/plan.md')?.content.startsWith('# Plan') && facts.outputs.find((o) => o.path === 'logo.png')?.content === null);
+    const prompt = S.briefPrompt({ title: hs.title, before: split.before, after: split.after, facts });
+    check('handoff prompt', prompt.system.includes('### Next step') && !prompt.system.includes('auth.ts')
+      && prompt.user.includes('<end_of_claude_ai_chat') && prompt.user.includes('_[Write: /w/auth.ts]_') && prompt.user.includes('docs/plan.md'));
+    const hdoc = S.handoffDoc({ s: hs, conv: cut, after: split.after, facts, brief: '### Goal\nLogin', model: 'sonnet' });
+    check('handoff doc', hdoc.startsWith('# Handoff: What is today') && hdoc.includes('https://claude.ai/chat/c2') && hdoc.includes('### Goal\nLogin')
+      && hdoc.includes('````\n# Plan\n```js') && hdoc.includes('`logo.png` (4 bytes') && hdoc.includes('## You\n\nquên mật khẩu để sau') && !hdoc.includes('what is today\n'));
+    check('handoff doc name and language', S.handoffDocName(hs) === `Handoff - What is today (${hrec.session.slice(6, 14)}).md` && S.looksVietnamese(turns) && !S.looksVietnamese(S.readTurns(listed)));
+    check('handoff clips long text at both ends', ((t) => t.startsWith('aa') && t.endsWith('zz') && t.includes('characters left out'))(S.clip('a'.repeat(5000) + 'z'.repeat(5000), 1000)));
   }
 
   {
