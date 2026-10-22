@@ -47,7 +47,10 @@ Run `ccgw` with no arguments and you get a status panel (gateway, login, Desktop
 `ccgw desktop gateway` / `ccgw desktop login` flips Claude Desktop between the gateway and your claude.ai account. Both sessions survive the switch.
 
 ### 🪟 Gateway and claude.ai side by side
-`ccgw desktop official` opens a second Claude Desktop signed in to your claude.ai account next to the gateway one (macOS and Windows). `ccgw desktop open` opens the gateway one. Restarting either never logs the other out.
+`ccgw desktop official` opens a second Claude Desktop signed in to your claude.ai account next to the gateway one (macOS and Windows). `ccgw desktop open` opens the gateway one, `ccgw desktop both` (*Open both*) the two together. Restarting either never logs the other out.
+
+### 🔄 Carry on when claude.ai runs out
+`ccgw sync` copies claude.ai chats, projects and skills into the gateway Desktop, so you keep going there. `ccgw handoff` brings the work back to the chat's claude.ai project when it has usage again: a note of what was done and what is next, plus the whole continuation.
 
 ### 🧩 Connectors from the terminal
 Gateway mode has no claude.ai connector directory, so ccgw adds them for you:
@@ -116,8 +119,8 @@ ccgw
 | | |
 |---|---|
 | **1 · Status** | Is the gateway running, who is logged in and for how long, which mode Desktop is in, which connectors are added, whether permission prompts are on, and whether a newer ccgw exists. |
-| **2 · Gateway** | Start / stop / restart, show the URL and key, sign in with your login tool. |
-| **3 · Claude Desktop** | Switch modes, add or remove connectors, turn permission prompts on or off. |
+| **2 · Gateway** | Start / stop / restart, show the URL and key. |
+| **3 · Claude Desktop** | Open the gateway Desktop, the official one, or both side by side; add or remove connectors; sync from and hand off to claude.ai; turn permission prompts on or off. |
 | **4 · Keys** | <kbd>↑</kbd>/<kbd>↓</kbd> move, <kbd>Enter</kbd> runs, a **number** jumps straight to an item, <kbd>Esc</kbd> goes back, <kbd>q</kbd> quits. |
 
 ### 2. Connect Claude Desktop by hand (optional)
@@ -202,14 +205,26 @@ ccgw sync --list                       # what there is, and how much is new
 - **Skills** on the account that the gateway Desktop lacks (skill-creator, mcp-builder, deep-research, …, enabled or not) are installed as one local plugin, `claude-ai-skills`.
 - Running it again only brings what changed. A chat updated on claude.ai replaces its gateway copy, unless you continued that copy in the gateway; then the new version comes in next to it.
 
-**The other way**, `ccgw sync --to-official` (*Sync to official…*), takes the same options:
+It reads claude.ai with the official Desktop's own sign-in (macOS asks once for the *Claude Safe Storage* Keychain item; on Windows the official Desktop locks that file while open, so the first sync closes it for a few seconds, still signed in, and keeps the sign-in sealed with DPAPI for later runs) and writes nothing to the official Desktop or your account. The gateway Desktop restarts to load what was copied (`--no-restart` skips that).
 
-- **Gateway projects** become claude.ai projects (a project that came from claude.ai goes back to that one), with `Project instructions.md` from the project's folder as their instructions.
-- **Chats** go in as Markdown transcripts in the project's knowledge (`Chat - <title> (<id>).md`); ones outside a project go to a claude.ai project named *Gateway chats*. claude.ai cannot take in a chat's history, so this is the way to pick one up there: open the project and ask Claude to continue from the file. A chat that moved on replaces its file on the next run.
-- **Skills you added** to the gateway Desktop are uploaded to your personal skills; one the account already has is left alone.
-- Nothing that came from claude.ai is sent back.
+## Hand off back to claude.ai
 
-It reads claude.ai with the official Desktop's own sign-in (macOS asks once for the *Claude Safe Storage* Keychain item; on Windows the official Desktop locks that file while open, so the first sync closes it for a few seconds, still signed in, and keeps the sign-in sealed with DPAPI for later runs) and never writes to the official Desktop or your account. The gateway Desktop restarts to load what was copied (`--no-restart` skips that).
+The usual round trip: claude.ai runs out of usage, you sync the chat to the gateway and carry on there, then claude.ai has usage again. claude.ai cannot take in a chat's history, so `ccgw handoff` (or *Hand off to official…*) brings back what happened in the gateway as one file in the chat's claude.ai project, and you start a new chat there from it:
+
+```bash
+ccgw handoff                           # tick chats continued in the gateway (and skills you added there); enter hands off
+ccgw handoff --list                    # what there is to hand off, with ids
+ccgw handoff --chat 9dc94ffe           # one chat, by title or id
+ccgw handoff --all --gateway-chats     # also chats started in the gateway
+```
+
+- **The file**, `Handoff - <title> (<id>).md` in the project's knowledge, has a note Claude Code writes from the continuation (goal, done, decisions and why, verified and not, still to do, next step, in the language you chat in), the files it edited, the commands it ran, the text files it left in the task's `outputs/` folder, and the whole continuation, so nothing rests on the note alone.
+- **Only what came after the copy** goes: the claude.ai part is already on claude.ai. A question claude.ai never answered (it ran out mid-chat) counts as the claude.ai part.
+- **Where**: the claude.ai project the chat came from. Chats started in the gateway (`--gateway-chats`) go to the claude.ai project their gateway project came from, or one made for it, and chats outside a project to one named *Gateway chats*.
+- **Then** ccgw prints the line to open a new chat in that project with, and copies it. Running it again after more work in the gateway replaces the file.
+- **Skills you added** to the gateway Desktop (`--skills`, or tick *Skills you added*) are uploaded to your claude.ai skills; one the account already has is left alone.
+
+The note uses the same Claude Code login as the gateway (`--model`, default `sonnet`; `--no-brief` skips it), with no tools and none of your settings, from an empty folder. Handoff writes to your claude.ai account: the files above, and a project when one is needed.
 
 ## Connectors
 
@@ -314,7 +329,7 @@ ccgw restart
 ```
 
 - The menu and `ccgw status` show who is signed in (first line of `--status`) and how long the login has left.
-- **Sign in with my-tool** (menu) or `ccgw credential login` runs the login command right in the current terminal; quit it to get back to the menu. `--window` opens it in a new terminal window instead.
+- `ccgw credential login` runs the login command right in the current terminal; quit it when done. `--window` opens it in a new terminal window instead.
 - With `--auto-login`, the gateway opens that window by itself 10 minutes before the login runs out (`--renew-minutes N`), once per token, unless it is already running.
 - Once the login has expired, Claude Desktop gets a plain error saying so instead of an obscure API failure.
 
@@ -376,12 +391,14 @@ Desktop reads the mode only when it starts, and keeps one process per data dir.
 | `ccgw desktop login` | switch Desktop back to claude.ai login mode |
 | `ccgw desktop toggle` / `status` | flip modes / show current mode |
 | `ccgw desktop open` | open the gateway Desktop (starts ccgw; restarts Desktop only if it needs switching) |
-| `ccgw desktop official [--sign-in]` | open a claude.ai-signed-in Desktop next to the gateway one; the first time (or with `--sign-in`) it waits for you to sign in |
+| `ccgw desktop official [--sign-in]` | open a claude.ai-signed-in Desktop next to the gateway one; the first time it waits for you to sign in (`--sign-in` when already signed in asks whether to sign in again) |
 | `ccgw desktop official status` / `quit` | is it running and signed in / quit it, keeping the sign-in |
+| `ccgw desktop both` | open the gateway Desktop and the official one side by side |
 | `ccgw connector add <preset>` | add a connector to Desktop, see [Connectors](#connectors) |
 | `ccgw connector list` / `remove <name>` | |
 | `ccgw connector add <preset> --official` | add a local connector (`refigma`, `gmail`, `figma-local`) to the official Desktop instead; `list` / `remove` take `--official` too |
-| `ccgw sync` | copy claude.ai chats, ticked projects and skills from the official Desktop into the gateway one (`--to-official`: the other way), see [Sync from claude.ai](#sync-from-claudeai) |
+| `ccgw sync` | copy claude.ai chats, ticked projects and skills from the official Desktop into the gateway one, see [Sync from claude.ai](#sync-from-claudeai) |
+| `ccgw handoff` | chats continued in the gateway (and skills you added) back to their claude.ai project, as a note plus the whole continuation, see [Hand off back to claude.ai](#hand-off-back-to-claudeai) |
 | `ccgw permissions [bypass\|ask] [name]` | skip or restore Desktop's per-tool permission prompts |
 | `ccgw figma status` / `plugin [--restart-figma]` | check the `figma-local` bridge / add the plugin to Figma Desktop |
 | `ccgw gmail status\|login\|logout` | manage the `gmail` sign-in |

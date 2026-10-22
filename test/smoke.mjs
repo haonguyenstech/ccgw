@@ -80,6 +80,35 @@ try {
       check('desktop official leaves the session alone', fs.readFileSync(path.join(off, 'config.json'), 'utf8') === session);
       check('desktop official status', ccgw('desktop', 'official', 'status').includes('signed in'));
     }
+    {
+      // Already signed in: --sign-in does not wait for a new session (holding
+      // Windows in claude.ai mode all along); without a TTY it only opens.
+      const off = path.join(desktopDir, 'official', 'Claude-Official');
+      fs.mkdirSync(off, { recursive: true });
+      fs.writeFileSync(path.join(off, 'config.json'), JSON.stringify({ lastKnownAccountUuid: 'acct', 'oauth:tokenCacheV2': 'tok' }));
+      const t0 = Date.now();
+      const signIn = ccgw('desktop', 'official', '--sign-in');
+      check('desktop official --sign-in when signed in only opens', signIn.includes('Already signed in') && signIn.includes('official Claude Desktop open') && Date.now() - t0 < 20_000);
+      const both = ccgw('desktop', 'both');
+      check('desktop both opens the gateway and the official Desktop', both.includes('gateway Claude Desktop open') && both.includes('official Claude Desktop open'), both.split('\n').filter(Boolean).join(' | '));
+      check('sync --to-official points at handoff', (() => { try { ccgw('sync', '--to-official'); return false; } catch (e) { return String(e.stderr).includes('ccgw handoff'); } })());
+    }
+    if (process.platform === 'win32') {
+      // A Windows sign-in cut off while it held the mode at "1p" (its process
+      // gone) is put back to gateway mode by the next ccgw command; one whose
+      // process is still alive is left alone.
+      const conf = path.join(desktopDir, 'claude_desktop_config.json');
+      const hold = path.join(home, 'mode-hold.json');
+      const setMode = (m) => fs.writeFileSync(conf, JSON.stringify({ ...JSON.parse(fs.readFileSync(conf, 'utf8')), deploymentMode: m }));
+      const mode = () => JSON.parse(fs.readFileSync(conf, 'utf8')).deploymentMode;
+      setMode('1p');
+      fs.writeFileSync(hold, JSON.stringify({ pid: process.pid, since: new Date().toISOString() }));
+      ccgw('desktop', 'status');
+      check('a live sign-in keeps the mode it holds', mode() === '1p' && fs.existsSync(hold));
+      fs.writeFileSync(hold, JSON.stringify({ pid: 999999, since: new Date().toISOString() }));
+      const st = ccgw('desktop', 'status');
+      check('a cut-off sign-in gets gateway mode back', mode() === '3p' && !fs.existsSync(hold) && st.includes('gateway mode'), st.split('\n')[0]);
+    }
     // CCGW_DESKTOP_DIR keeps these off the real Desktop config and process.
     {
       check('connector add', ccgw('connector', 'add', 'clickup', '--no-restart').includes('added'));
@@ -129,6 +158,18 @@ try {
       ccgw('connector', 'remove', 'gmail', '--official', '--no-restart');
       check('connector remove --official', !offGmail().mcpServers.gmail && offGmail().preferences?.keep === 1 && ccgw('connector', 'list') === gatewayBefore);
     }
+  }
+
+  {
+    // The update notice: a box whose lines all line up, however long the
+    // link, and a bar that still reads without colour; "last … ago" in the menu.
+    const M = await import('../src/menu.mjs');
+    const plain = (x) => x.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+    const box = plain(M.callout([`${M.NEWS}  ccgw v9.9.9 is available  (you have v1.0.0)`, '   Update:     ccgw update', `   What's new: https://example.com/${'x'.repeat(200)}`])).split('\n');
+    check('update notice box lines up', box.length === 5 && new Set(box.map((l) => [...l].length)).size === 1 && box[1].includes('v9.9.9 is available') && box[3].includes('…'), `${[...box[0]].length} cols`);
+    check('update banner names the version', plain(M.banner('ccgw v9.9.9 is available')).includes('ccgw v9.9.9 is available'));
+    const now = Date.UTC(2026, 9, 22, 12);
+    check('ago', M.ago(now - 20_000, now) === 'just now' && M.ago(now - 5 * 60_000, now) === '5m ago' && M.ago(now - 3 * 3_600_000, now) === '3h ago' && M.ago(now - 7 * 86_400_000, now) === '7d ago');
   }
 
   {
@@ -184,13 +225,10 @@ try {
       && store.builtinSkills.has('docx'));
     S.removeSession(store, rec.session);
     check('sync removes a session', !fs.existsSync(sdir) && !fs.existsSync(path.join(store.base, `${rec.session}.json`)));
-    // --to-official: a gateway task read back as a Markdown transcript, without tool output or thinking.
+    // handoff: gateway tasks as it lists them.
     const back = S.writeSession(store, conv, { space });
     const listed = S.gatewaySessions(store).find((x) => x.session === back.session);
-    const md = S.transcriptMarkdown(listed);
-    check('to-official lists gateway tasks', listed?.title === 'What is today' && listed.spaceId === space.id && listed.size === back.auditSize);
-    check('to-official transcript', md.startsWith('# What is today') && md.includes('## You\n\nwhat is today') && md.includes('## Claude\n\nThursday.') && !md.includes('edited-away'));
-    check('to-official doc name', S.chatDocName(listed) === `Chat - What is today (${back.session.slice(6, 14)}).md`);
+    check('handoff lists gateway tasks', listed?.title === 'What is today' && listed.spaceId === space.id && listed.size === back.auditSize);
     const up = path.join(store.base, 'cowork_plugins', 'marketplaces', 'local-desktop-app-uploads', 'my-plugin');
     fs.mkdirSync(path.join(up, 'skills', 'mine'), { recursive: true });
     fs.writeFileSync(path.join(up, 'skills', 'mine', 'SKILL.md'), '---\nname: mine\n---\n');
@@ -198,7 +236,7 @@ try {
     const inst2 = JSON.parse(fs.readFileSync(ifile, 'utf8'));
     inst2.plugins['my-plugin@local-desktop-app-uploads'] = [{ scope: 'user', installPath: up }];
     fs.writeFileSync(ifile, JSON.stringify(inst2));
-    check('to-official finds the user\'s skills, not the copied ones', JSON.stringify(S.gatewayUserSkills(store).map((x) => x.name)) === '["mine"]');
+    check('handoff finds the user\'s skills, not the copied ones', JSON.stringify(S.gatewayUserSkills(store).map((x) => x.name)) === '["mine"]');
 
     // handoff: a claude.ai chat that ran out on an unanswered question, then
     // went on in the gateway with tool calls and an output file.

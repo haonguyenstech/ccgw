@@ -440,7 +440,7 @@ export function installSkills(store, skills, version) {
   return plugin;
 }
 
-// ---------------------------------------------------------------- gateway → claude.ai
+// ---------------------------------------------------------------- gateway → claude.ai (handoff)
 
 // The gateway's Cowork tasks, newest first; `size` (its audit log's) tells a
 // task that moved on since the last sync.
@@ -537,18 +537,6 @@ export function turnsMarkdown(turns) {
     else blocks.push({ who: x.who, parts: [text] });
   }
   return blocks.flatMap((b) => [`## ${b.who}`, '', b.parts.join('\n\n'), '']).join('\n');
-}
-
-// A task as Markdown: what was said, with tool calls named but their output
-// and the model's thinking left out.
-export function transcriptMarkdown(s) {
-  const when = (t) => new Date(t).toISOString().slice(0, 16).replace('T', ' ');
-  const turns = readTurns(s).map((x) => (x.tool ? { ...x, tool: { name: x.tool.name, input: {} } } : x));
-  return [
-    `# ${s.title}`, '',
-    `_Chat from the gateway Claude Desktop (Claude Code), ${when(s.createdAt)} – ${when(s.lastActivityAt)} UTC, copied by ccgw sync. Tool output and thinking are left out._`, '',
-    turnsMarkdown(turns).replace(/_\[(.+?)\]_/g, '_[used $1]_'),
-  ].join('\n');
 }
 
 // ---------------------------------------------------------------- handoff
@@ -660,8 +648,6 @@ export function handoffDoc({ s, conv, after, facts, brief, model }) {
 }
 
 export const handoffDocName = (s) => `Handoff - ${safeName(s.title).slice(0, 60)} (${s.session.slice(6, 14)}).md`;
-
-export const chatDocName = (s) => `Chat - ${safeName(s.title).slice(0, 60)} (${s.session.slice(6, 14)}).md`;
 
 // Skills the user added to the gateway Desktop (uploaded plugins), not the
 // ones ccgw copied from claude.ai.

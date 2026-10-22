@@ -15,8 +15,8 @@ export const accent = (s) => paint(truecolor ? '38;2;217;119;87' : '38;5;173', s
 // Legacy Windows consoles (conhost without Windows Terminal) lack these glyphs.
 const ascii = process.platform === 'win32' && !process.env.WT_SESSION && process.env.TERM_PROGRAM !== 'vscode';
 const G = ascii
-  ? { pointer: '>', picked: '>', keys: 'up/down move', box: ['+', '+', '+', '+', '-', '|'], up: '^', down: 'v' }
-  : { pointer: '❯', picked: '›', keys: '↑↓ move', box: ['╭', '╮', '╰', '╯', '─', '│'], up: '↑', down: '↓' };
+  ? { pointer: '>', picked: '>', keys: 'up/down move', box: ['+', '+', '+', '+', '-', '|'], up: '^', down: 'v', news: '^' }
+  : { pointer: '❯', picked: '›', keys: '↑↓ move', box: ['╭', '╮', '╰', '╯', '─', '│'], up: '↑', down: '↓', news: '⬆' };
 
 const visible = (s) => s.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
 const width = (s) => [...visible(s)].length;
@@ -36,6 +36,40 @@ function fit(line, max = (process.stdout.columns || 80) - 1) {
     }
   }
   return out;
+}
+
+// "5m ago", "3h ago", "7d ago": when something last ran.
+export function ago(ms, now = Date.now()) {
+  const m = Math.round((now - ms) / 60_000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  if (m < 48 * 60) return `${Math.round(m / 60)}h ago`;
+  return `${Math.round(m / 1440)}d ago`;
+}
+
+// The glyph that marks a newer ccgw.
+export const NEWS = G.news;
+
+// A full-width bar in the accent colour, for news that should not be missed
+// (a newer ccgw). Without colour it is bracketed instead.
+export function banner(text) {
+  const cols = Math.min((process.stdout.columns || 80) - 2, 100);
+  const body = ` ${text} `;
+  if (!color) return `[${body}]`;
+  const bg = truecolor ? '48;2;217;119;87' : '48;5;173';
+  return ` ${ESC}${bg};1;97m${pad(fit(body, cols), cols)}${ESC}0m`;
+}
+
+// A box drawn in the accent colour around a few lines, first one bold: the
+// update notice printed after a command.
+export function callout(lines) {
+  const inner = Math.min(Math.max(...lines.map(width)), (process.stdout.columns || 80) - 6);
+  const [tl, tr, bl, br, h, v] = G.box;
+  return [
+    accent(`${tl}${h.repeat(inner + 2)}${tr}`),
+    ...lines.map((l, i) => `${accent(v)} ${pad(fit(i ? l : bold(l), inner), inner)} ${accent(v)}`),
+    accent(`${bl}${h.repeat(inner + 2)}${br}`),
+  ].join('\n');
 }
 
 // A rounded box of "key   value" rows, for the status header.
