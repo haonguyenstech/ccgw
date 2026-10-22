@@ -212,16 +212,18 @@ It reads claude.ai with the official Desktop's own sign-in (macOS asks once for 
 The usual round trip: claude.ai runs out of usage, you sync the chat to the gateway and carry on there, then claude.ai has usage again. claude.ai cannot take in a chat's history, so `ccgw handoff` (or *Hand off to official…*) brings back what happened in the gateway as one file in the chat's claude.ai project, and you start a new chat there from it:
 
 ```bash
-ccgw handoff                           # tick chats continued in the gateway (and skills you added there); enter hands off
+ccgw handoff                           # tick chats (continued from claude.ai, or started in the gateway; newest first) and skills you added; enter hands off
 ccgw handoff --list                    # what there is to hand off, with ids
 ccgw handoff --chat 9dc94ffe           # one chat, by title or id
-ccgw handoff --all --gateway-chats     # also chats started in the gateway
+ccgw handoff --all --gateway-chats     # without the list: also chats started in the gateway
+ccgw skill add read-sync               # once: "read sync" in a claude.ai project reads its latest handoff
 ```
 
 - **The file**, `Handoff - <title> (<id>).md` in the project's knowledge, has a note Claude Code writes from the continuation (goal, done, decisions and why, verified and not, still to do, next step, in the language you chat in), the files it edited, the commands it ran, the text files it left in the task's `outputs/` folder, and the whole continuation, so nothing rests on the note alone.
 - **Only what came after the copy** goes: the claude.ai part is already on claude.ai. A question claude.ai never answered (it ran out mid-chat) counts as the claude.ai part.
-- **Where**: the claude.ai project the chat came from. Chats started in the gateway (`--gateway-chats`) go to the claude.ai project their gateway project came from, or one made for it, and chats outside a project to one named *Gateway chats*.
-- **Then** ccgw prints the line to open a new chat in that project with, and copies it. Running it again after more work in the gateway replaces the file.
+- **Where**: the claude.ai project the chat came from. Chats started in the gateway go to the claude.ai project their gateway project came from, else a claude.ai project of the same name, else one made for it; chats outside a project go to one named *Gateway chats*. The list says *(new project)* when one will be made.
+- **Then** ccgw prints the line to open a new chat in that project with, and copies it. Running it again after more work in the gateway replaces the file (the new one goes up first, so a failed upload keeps the old one).
+- **read-sync skill**: `ccgw skill add read-sync` (or *Add read-sync skill*) puts a skill on your claude.ai account. Say `read sync` (or "đọc sync") in the project: Claude reads its newest handoff file in full and replies with one line that it has understood it, then carries on from it when you ask.
 - **Skills you added** to the gateway Desktop (`--skills`, or tick *Skills you added*) are uploaded to your claude.ai skills; one the account already has is left alone.
 
 The note uses the same Claude Code login as the gateway (`--model`, default `sonnet`; `--no-brief` skips it), with no tools and none of your settings, from an empty folder. Handoff writes to your claude.ai account: the files above, and a project when one is needed.
@@ -399,6 +401,7 @@ Desktop reads the mode only when it starts, and keeps one process per data dir.
 | `ccgw connector add <preset> --official` | add a local connector (`refigma`, `gmail`, `figma-local`) to the official Desktop instead; `list` / `remove` take `--official` too |
 | `ccgw sync` | copy claude.ai chats, ticked projects and skills from the official Desktop into the gateway one, see [Sync from claude.ai](#sync-from-claudeai) |
 | `ccgw handoff` | chats continued in the gateway (and skills you added) back to their claude.ai project, as a note plus the whole continuation, see [Hand off back to claude.ai](#hand-off-back-to-claudeai) |
+| `ccgw skill add read-sync` | add the read-sync skill to your claude.ai account: `read sync` in a project reads its latest handoff |
 | `ccgw permissions [bypass\|ask] [name]` | skip or restore Desktop's per-tool permission prompts |
 | `ccgw figma status` / `plugin [--restart-figma]` | check the `figma-local` bridge / add the plugin to Figma Desktop |
 | `ccgw gmail status\|login\|logout` | manage the `gmail` sign-in |

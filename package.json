@@ -1,6 +1,6 @@
 {
   "name": "ccgw",
-  "version": "0.3.22",
+  "version": "0.3.23",
   "description": "Use your Claude Code CLI login as an inference gateway for Claude Desktop",
   "type": "module",
   "bin": {
@@ -10,6 +10,7 @@
     "bin/",
     "src/",
     "figma-plugin/",
+    "skills/",
     "README.md",
     "LICENSE"
   ],

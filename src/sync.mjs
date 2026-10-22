@@ -184,11 +184,11 @@ export function claudeAi({ sessionKey, lastActiveOrg }) {
     skills: async () => (await get(await o('skills/list-skills?include_wiggle_skills=true&entrypoint=local-agent'))).skills || [],
     downloadSkill: async (id) => call('GET', await o(`skills/download-dot-skill-file?skill_id=${encodeURIComponent(id)}&entrypoint=local-agent`), undefined, { raw: true }),
     // "added", or "exists" when the account already has a skill of that name.
-    async uploadSkill(name, zip) {
+    async uploadSkill(name, zip, { overwrite = false } = {}) {
       const form = new FormData();
       form.append('file', new Blob([zip], { type: 'application/zip' }), `${name}.skill`);
       try {
-        await call('POST', await o(`skills/upload-skill?overwrite=false&check_skill_name=${encodeURIComponent(name)}`), form);
+        await call('POST', await o(`skills/upload-skill?overwrite=${overwrite}&check_skill_name=${encodeURIComponent(name)}`), form);
         return 'added';
       } catch (e) {
         if (/already_exists|name_taken|name_reserved/.test(e.code || '')) return 'exists';
@@ -625,8 +625,8 @@ export function handoffDoc({ s, conv, after, facts, brief, model }) {
   return [
     `# Handoff: ${s.title}`, '',
     conv
-      ? `_The claude.ai chat [${conv.name || s.title}](https://claude.ai/chat/${conv.uuid}) was continued in Claude Code (gateway Claude Desktop), ${when(from)} – ${when(to)} UTC. Written by ccgw handoff._`
-      : `_A chat in Claude Code (gateway Claude Desktop), ${when(from)} – ${when(to)} UTC. Written by ccgw handoff._`,
+      ? `_The claude.ai chat [${conv.name || s.title}](https://claude.ai/chat/${conv.uuid}) was continued in Claude Code (gateway Claude Desktop), ${when(from)} – ${when(to)} UTC. Handed off ${when(Date.now())} UTC. Written by ccgw handoff._`
+      : `_A chat in Claude Code (gateway Claude Desktop), ${when(from)} – ${when(to)} UTC. Handed off ${when(Date.now())} UTC. Written by ccgw handoff._`,
     '',
     '## Handoff note', '',
     brief ? `${brief.trim()}\n\n_Note written by ${model} from the transcript below; the transcript is the record._` : '_No note was written (see the transcript below)._',

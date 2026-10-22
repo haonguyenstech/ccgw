@@ -967,6 +967,8 @@ function help() {
                                chats synced from claude.ai and continued in the gateway → their claude.ai project: a note
                                Claude Code writes (done, decisions, next step) + the whole continuation
                                (--gateway-chats: also chats started in the gateway; --skills: skills you added there)
+  ccgw skill add read-sync     add the read-sync skill to your claude.ai account: say "read sync" in a project
+                               and Claude reads its latest handoff note and confirms it understood
   ccgw permissions bypass [name]   skip Desktop's "Claude wants to use …" prompts (all connectors, or one)
   ccgw permissions ask [name]      prompt again;  ccgw permissions  shows the current setting
   ccgw connector add gmail --client-json <file>   Gmail via your Google OAuth client (runs locally)
@@ -1055,6 +1057,7 @@ async function run(cmd, args) {
     case 'connector': case 'connectors': return connector(args);
     case 'sync': return sync(args);
     case 'handoff': return handoff(args);
+    case 'skill': case 'skills': return skill(args);
     case 'gmail': return gmail(args);
     case 'figma': return figma(args);
     case 'permissions': case 'perms': return permissions(args);
@@ -1120,7 +1123,8 @@ async function menu() {
           { label: 'Connectors…', value: 'connectors', hint: `${names.length} added` },
           ...(officialSupported && syncSupported ? [
             { label: 'Sync from official…', value: 'sync', hint: `claude.ai chats, projects, skills → gateway · ${runs.sync ? `last ${ago(runs.sync)}` : 'never run'}` },
-            { label: 'Hand off to official…', value: 'handoff', hint: `chats continued here → claude.ai project, with a note · ${runs.handoff ? `last ${ago(runs.handoff)}` : 'never run'}` },
+            { label: 'Hand off to official…', value: 'handoff', hint: `gateway chats → claude.ai project, with a note · ${runs.handoff ? `last ${ago(runs.handoff)}` : 'never run'}` },
+            { label: 'Add read-sync skill', value: 'skill-read-sync', hint: 'to claude.ai: "read sync" in a project reads its latest handoff note' },
           ] : []),
           bypassAll()
             ? { label: 'Permission prompts: off', value: 'perms-ask', hint: 'turn back on (restarts Desktop)' }
@@ -1156,6 +1160,7 @@ async function menu() {
           case 'connectors': await connectorMenu(); break;
           case 'sync': await sync([]); break;
           case 'handoff': await handoff([]); break;
+          case 'skill-read-sync': await skill(['add', 'read-sync']); break;
           case 'perms-bypass': await permissions(['bypass']); break;
           case 'perms-ask': await permissions(['ask']); break;
           case 'check': {
@@ -1476,6 +1481,11 @@ const GATEWAY_CHATS = 'Gateway chats';
 // The claude.ai project for a gateway one (or OUTSIDE, for "Gateway chats"):
 // the one it came from, the one made last time (unless deleted since), or a
 // new one.
+const sameName = (a, b) => {
+  const norm = (x) => String(x || '').normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
+  return norm(a) === norm(b);
+};
+
 function remoteProjectFor(api, state, remoteProjects, onCreate = () => {}) {
   const out = state.toOfficial ??= { projects: {}, chats: {}, skills: [] };
   const origin = Object.fromEntries(Object.entries(state.projects).map(([remote, space]) => [space, remote]));
@@ -1483,6 +1493,10 @@ function remoteProjectFor(api, state, remoteProjects, onCreate = () => {}) {
   return async (key, name, instructions) => {
     if (await exists(origin[key])) return origin[key];
     if (await exists(out.projects[key])) return out.projects[key];
+    // A claude.ai project of the same name (one the gateway project was made
+    // by hand to match, say) takes the chat rather than a second copy.
+    const same = remoteProjects.find((p) => sameName(p.name, name));
+    if (same) return (out.projects[key] = same.uuid);
     const p = await api.createProject(name, 'From the gateway Claude Desktop (Claude Code), copied by ccgw sync.');
     if (instructions) await api.setInstructions(p.uuid, instructions);
     out.projects[key] = p.uuid;
@@ -1498,6 +1512,28 @@ const instructionsOf = (sp) => {
   }
   return '';
 };
+
+// ---------------------------------------------------------------- skills shipped with ccgw
+
+// Skills that come with ccgw, for the claude.ai account (the official Desktop).
+// Adding one again replaces it, so an updated ccgw brings its newer version.
+const BUNDLED_SKILLS = path.join(ROOT, 'skills');
+
+async function skill(args) {
+  const names = fs.existsSync(BUNDLED_SKILLS) ? fs.readdirSync(BUNDLED_SKILLS).filter((n) => fs.existsSync(path.join(BUNDLED_SKILLS, n, 'SKILL.md'))) : [];
+  const [cmd, name] = args;
+  if (cmd !== 'add' || !names.includes(name)) fail(`usage: ccgw skill add ${names.join('|') || '<name>'}`);
+  if (!officialSupported) fail('ccgw skill add needs macOS or Windows.');
+  console.log(dim(`Signing in to claude.ai as the official Desktop${IS_WIN ? '' : ' (macOS may ask for the "Claude Safe Storage" Keychain item: click Allow)'}…`));
+  try {
+    const api = await officialApi();
+    await api.uploadSkill(name, zipSkill(path.join(BUNDLED_SKILLS, name), name), { overwrite: true });
+  } catch (e) {
+    fail(e.message);
+  }
+  console.log(green(`✓ skill "${name}" is on your claude.ai account`));
+  if (name === 'read-sync') console.log(dim('  In the claude.ai project you handed off to, start a chat with: read sync'));
+}
 
 // ---------------------------------------------------------------- handoff back to the official Desktop
 
@@ -1578,6 +1614,7 @@ async function handoff(args) {
     console.log(dim('  Handoff is for this: sync a claude.ai chat to the gateway (Sync from official), chat on in it there, then hand it off.'));
     if (mineWaiting && !args.includes('--gateway-chats')) console.log(dim(`  ${plural(mineWaiting, 'chat')} started in the gateway can go too: ccgw handoff --gateway-chats`));
   };
+  const dest = (it) => `→ "${it.target.name}"${it.target.id || remoteProjects.some((p) => sameName(p.name, it.target.name)) ? '' : ' (new project)'}`;
   const hint = (it) => `${it.from ? 'continued from claude.ai' : 'started in the gateway'} → "${it.target.name}"${it.pending ? '' : ' · handed off, unchanged'}`;
 
   if (listOnly) {
@@ -1606,15 +1643,14 @@ async function handoff(args) {
     wantSkills = newSkills.length > 0;
   } else if (args.includes('--skills')) picked = [];
   else if (interactive()) {
-    // The point is chats that came from claude.ai and went on here; chats
-    // that only ever lived in the gateway are offered with --gateway-chats.
-    const withMine = args.includes('--gateway-chats');
-    const pend = items.filter((it) => it.pending && (it.from || withMine));
+    // Chats continued from claude.ai come first; chats that only ever lived
+    // in the gateway are offered in their own section, nothing ticked.
+    const pend = items.filter((it) => it.pending);
     if (!pend.length && !newSkills.length) return nothingToHandOff();
     const cont = pend.filter((it) => it.from), mine = pend.filter((it) => !it.from);
     const ids = await checklist(`${bold('Hand off to the official Desktop')}  ${dim('gateway → claude.ai project · a note + the whole continuation')}`, [
-      ...(cont.length ? [{ section: 'Continued from claude.ai' }, ...cont.map((it) => ({ label: short(it.s.title, 48), value: it.s.session, hint: `→ "${it.target.name}"` }))] : []),
-      ...(mine.length ? [{ section: 'Started in the gateway' }, ...mine.map((it) => ({ label: short(it.s.title, 48), value: it.s.session, hint: `→ "${it.target.name}"` }))] : []),
+      ...(cont.length ? [{ section: 'Continued from claude.ai' }, ...cont.map((it) => ({ label: short(it.s.title, 48), value: it.s.session, hint: `${ago(it.s.lastActivityAt)} ${dest(it)}` }))] : []),
+      ...(mine.length ? [{ section: 'Started in the gateway' }, ...mine.map((it) => ({ label: short(it.s.title, 48), value: it.s.session, hint: `${ago(it.s.lastActivityAt)} ${dest(it)}` }))] : []),
       ...(newSkills.length ? [{ section: 'Other' }, { label: 'Skills you added', value: SKILLS, hint: skillHint }] : []),
     ], { verb: 'hand off' });
     if (!ids) return console.log(dim('Handoff cancelled.'));
@@ -1648,9 +1684,17 @@ async function handoff(args) {
       }
       const project = it.target.id || await projectFor(it.target.key, it.target.name, it.target.instructions);
       const prev = done[s.session];
-      if (prev?.doc) await api.deleteDoc(prev.project, prev.doc);
       const name = handoffDocName(s);
+      // The new note goes in before the old one goes, so a failed upload
+      // leaves the last note in place. Old notes are found by the record and,
+      // should that be lost, by the chat's id in the file name.
       const doc = await api.addDoc(project, name, handoffDoc({ s, conv: it.conv, after, facts, brief, model }));
+      const tag = `(${s.session.slice(6, 14)}).md`;
+      const stale = (await api.docs(project).catch(() => []))
+        .filter((d) => d.uuid !== doc.uuid && d.file_name?.startsWith('Handoff - ') && d.file_name.endsWith(tag))
+        .map((d) => [project, d.uuid]);
+      if (prev?.doc && prev.doc !== doc.uuid && !stale.some(([, id]) => id === prev.doc)) stale.push([prev.project, prev.doc]);
+      for (const [pid, id] of stale) await api.deleteDoc(pid, id).catch(() => {});
       done[s.session] = { project, doc: doc.uuid, size: s.size, at: new Date().toISOString() };
       writeJson(SYNC_FILE, state);
       results.push({ it, project, name, brief: !!brief, vi: looksVietnamese(turns) });
