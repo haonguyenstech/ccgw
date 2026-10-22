@@ -91,6 +91,7 @@ try {
       check('desktop official --sign-in when signed in only opens', signIn.includes('Already signed in') && signIn.includes('official Claude Desktop open') && Date.now() - t0 < 20_000);
       const both = ccgw('desktop', 'both');
       check('desktop both opens the gateway and the official Desktop', both.includes('gateway Claude Desktop open') && both.includes('official Claude Desktop open'), both.split('\n').filter(Boolean).join(' | '));
+      check('desktop quit-both with neither running', ccgw('desktop', 'quit-both').includes('neither Claude Desktop is running'));
       check('sync --to-official points at handoff', (() => { try { ccgw('sync', '--to-official'); return false; } catch (e) { return String(e.stderr).includes('ccgw handoff'); } })());
     }
     if (process.platform === 'win32') {

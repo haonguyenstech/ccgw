@@ -47,7 +47,7 @@ Run `ccgw` with no arguments and you get a status panel (gateway, login, Desktop
 `ccgw desktop gateway` / `ccgw desktop login` flips Claude Desktop between the gateway and your claude.ai account. Both sessions survive the switch.
 
 ### 🪟 Gateway and claude.ai side by side
-`ccgw desktop official` opens a second Claude Desktop signed in to your claude.ai account next to the gateway one (macOS and Windows). `ccgw desktop open` opens the gateway one, `ccgw desktop both` (*Open both*) the two together. Restarting either never logs the other out.
+`ccgw desktop official` opens a second Claude Desktop signed in to your claude.ai account next to the gateway one (macOS and Windows). `ccgw desktop open` opens the gateway one, `ccgw desktop both` (*Open both*) the two together, and `ccgw desktop quit-both` (*Quit both*) quits them both while the gateway keeps running. Restarting either never logs the other out.
 
 ### 🔄 Carry on when claude.ai runs out
 `ccgw sync` copies claude.ai chats, projects and skills into the gateway Desktop, so you keep going there. `ccgw handoff` brings the work back to the chat's claude.ai project when it has usage again: a note of what was done and what is next, plus the whole continuation.
@@ -396,6 +396,7 @@ Desktop reads the mode only when it starts, and keeps one process per data dir.
 | `ccgw desktop official [--sign-in]` | open a claude.ai-signed-in Desktop next to the gateway one; the first time it waits for you to sign in (`--sign-in` when already signed in asks whether to sign in again) |
 | `ccgw desktop official status` / `quit` | is it running and signed in / quit it, keeping the sign-in |
 | `ccgw desktop both` | open the gateway Desktop and the official one side by side |
+| `ccgw desktop quit-both` | quit the gateway Desktop and the official one (the gateway keeps running) |
 | `ccgw connector add <preset>` | add a connector to Desktop, see [Connectors](#connectors) |
 | `ccgw connector list` / `remove <name>` | |
 | `ccgw connector add <preset> --official` | add a local connector (`refigma`, `gmail`, `figma-local`) to the official Desktop instead; `list` / `remove` take `--official` too |

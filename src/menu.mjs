@@ -1,4 +1,4 @@
-// Minimal interactive prompts (no dependencies): an arrow-key (and mouse)
+// Minimal interactive prompts (no dependencies): an arrow-key
 // list selector and a line input. Works in macOS terminals and Windows Terminal/PowerShell.
 import readline from 'node:readline';
 
@@ -93,85 +93,22 @@ function scroller() {
   let top = 0;
   return (head, body, at, foot) => {
     const room = (process.stdout.rows || 24) - 1 - head.length - foot.length;
-    // `.line(r)` gives the body line drawn on row r, or -1, for mouse clicks.
-    const tag = (shown, first, from, n) => Object.assign(shown, { line: (r) => (r >= first && r < first + n ? from + r - first : -1) });
-    if (body.length <= room || room < 5) { top = 0; return tag([...head, ...body, ...foot], head.length, 0, body.length); }
+    if (body.length <= room || room < 5) { top = 0; return [...head, ...body, ...foot]; }
     const win = room - 2;
     if (at < top + 1) top = Math.max(0, at - 1);
     if (at > top + win - 2) top = Math.min(body.length - win, at - win + 2);
     top = Math.max(0, Math.min(top, body.length - win));
     const below = body.length - top - win;
-    return tag([
+    return [
       ...head,
       top ? dim(`    ${G.up} ${top} more`) : '',
       ...body.slice(top, top + win),
       below ? dim(`    ${G.down} ${below} more`) : '',
       ...foot,
-    ], head.length + 1, top, win);
+    ];
   };
 }
 
-// Mouse support while a list waits for a pick: a click picks, the wheel moves.
-// The terminal reports each as ESC [ < button ; col ; row M (SGR mode), which
-// Node's keypress decoder splits into "ESC [<" and single characters, so they
-// are pieced back together here before the key handler could take "1" for a
-// jump. Where the list sits on screen comes from a cursor-position query sent
-// after each draw; a terminal that never answers never gets mouse mode, and
-// one that has no mouse support ignores the request. CCGW_NO_MOUSE=1 turns
-// it off (the terminal's own text selection then works without Option/Shift).
-// The pointer moving over an item highlights it, as a menu does; terminals
-// that can change the mouse pointer's shape (kitty, Ghostty, WezTerm, foot)
-// show a hand there.
-// Not on Windows: Node's raw mode reads the console API there, and the
-// console swallows mouse reports instead of passing them on as text.
-const mouseOff = `${ESC}?1006l${ESC}?1003l${ESC}?1000l`;
-let mouseOn = false;
-const shapes = ['ghostty', 'WezTerm'].includes(process.env.TERM_PROGRAM) || /kitty|foot/.test(process.env.TERM || '');
-const shape = (name) => `\x1b]22;${name}\x1b\\`;
-let hand = false;
-function pointer(onMouse) {
-  const { stdout } = process;
-  const wanted = process.platform !== 'win32' && !process.env.CCGW_NO_MOUSE;
-  let buf = null;
-  let top = 0; // the screen row (1-based) of the list's first line
-  return {
-    // Call after each draw of `drawn` lines: asks where the cursor ended up.
-    drawn(n) { if (wanted) { this.n = n; stdout.write(`${ESC}6n`); } },
-    // Takes a keypress; true when it was part of a mouse or position report.
-    take(key = {}) {
-      const seq = key.sequence || '';
-      if (buf !== null) {
-        buf += seq;
-        if (!/[Mm]$/.test(seq)) return true;
-        const [b, , y] = buf.slice(0, -1).split(';').map(Number);
-        const button = b & ~28; // without Shift/Alt/Ctrl
-        buf = null;
-        // A click counts on release, like an app's button, so the release
-        // never arrives after the list is gone (where it would print as
-        // text); the wheel (64, 65) only ever sends presses; 32 marks a move.
-        const row = y - top;
-        if (seq === 'm') { if (button === 0) onMouse(0, row); }
-        else if (button >= 64) onMouse(button, row);
-        else if (button & 32) onMouse('hover', row);
-        return true;
-      }
-      if (seq === `${ESC}<`) { buf = ''; return true; }
-      const pos = /^\x1b\[(\d+);\d+R$/.exec(seq);
-      if (pos) {
-        top = Number(pos[1]) - this.n;
-        if (!mouseOn) { stdout.write(`${ESC}?1000h${ESC}?1003h${ESC}?1006h`); mouseOn = true; }
-        return true;
-      }
-      return false;
-    },
-    // A hand over something clickable, the usual arrow elsewhere.
-    point(over) { if (shapes && mouseOn && over !== hand) { hand = over; stdout.write(shape(over ? 'pointer' : 'default')); } },
-    off() {
-      this.point(false);
-      if (mouseOn) { stdout.write(mouseOff); mouseOn = false; }
-    },
-  };
-}
 
 let cursorHidden = false;
 
@@ -221,7 +158,7 @@ export function lastLines(text, max) {
 export const interactive = () => !!(process.stdin.isTTY && process.stdout.isTTY);
 
 // Resolves to the chosen item's value, or null on Esc / q / Ctrl+C.
-// items: [{ label, value, hint?, disabled?, confirm? } | { section: 'NAME' }]
+// items: [{ label, value, hint?, disabled? } | { section: 'NAME' }]
 // title: a line or an array of lines (e.g. a panel()) drawn above the list.
 export function select(title, items, { initial = 0 } = {}) {
   return new Promise((resolve) => {
@@ -234,11 +171,9 @@ export function select(title, items, { initial = 0 } = {}) {
     const numbered = pickable.length <= 9;
 
     const view = scroller();
-    let lineItem = [];
     const render = () => {
       if (drawn) stdout.write(`${ESC}${drawn}A${ESC}0J`);
       const lines = [];
-      lineItem = [];
       let at = 0;
       items.forEach((it, i) => {
         if (it.section) {
@@ -247,11 +182,9 @@ export function select(title, items, { initial = 0 } = {}) {
         }
         const on = i === cursor;
         if (on) at = lines.length;
-        lineItem[lines.length] = i;
         const n = numbered ? `${pickable.indexOf(i) + 1}  ` : '';
-        const label = it.hint || armed === i ? pad(it.label, labelW) : it.label;
-        const hint = armed === i ? `   ${accent('click again to confirm')}`
-          : it.hint ? `   ${it.disabled ? dim(it.hint) : on ? it.hint : dim(it.hint)}` : '';
+        const label = it.hint ? pad(it.label, labelW) : it.label;
+        const hint = it.hint ? `   ${it.disabled ? dim(it.hint) : on ? it.hint : dim(it.hint)}` : '';
         if (it.disabled) lines.push(`    ${dim(n + label)}${hint}`);
         else if (on) lines.push(`  ${accent(G.pointer)} ${accent(n)}${bold(accent(label))}${hint}`);
         else lines.push(`    ${dim(n)}${label}${hint}`);
@@ -260,8 +193,6 @@ export function select(title, items, { initial = 0 } = {}) {
         ['', dim(`  ${G.keys} · enter select${numbered ? ' · 1-' + pickable.length + ' jump' : ''} · esc back`)]);
       stdout.write(shown.map((l) => fit(l)).join('\n') + '\n');
       drawn = shown.length;
-      lineAt = shown.line;
-      mouse.drawn(drawn);
     };
 
     const move = (delta) => {
@@ -274,7 +205,6 @@ export function select(title, items, { initial = 0 } = {}) {
 
     const done = (value) => {
       stdin.removeListener('keypress', onKey);
-      mouse.off();
       if (stdin.isTTY) stdin.setRawMode(false);
       stdin.pause();
       stdout.write(`${ESC}${drawn}A${ESC}0J${ESC}?25h`);
@@ -284,29 +214,7 @@ export function select(title, items, { initial = 0 } = {}) {
       resolve(value);
     };
 
-    // A click picks the item under it; one marked `confirm` (stopping the
-    // gateway, restarting Desktop) takes a second click, as a slip is costly.
-    let armed = null;
-    let lineAt = () => -1;
-    const mouse = pointer((button, row) => {
-      if (button === 64) return move(-1);
-      if (button === 65) return move(1);
-      const i = lineItem[lineAt(row)];
-      const live = i !== undefined && !items[i].disabled;
-      if (button === 'hover') {
-        mouse.point(live);
-        if (live && i !== cursor) { cursor = i; if (armed !== i) armed = null; render(); }
-        return;
-      }
-      if (button !== 0 || !live) return;
-      if (items[i].confirm && armed !== i) { cursor = armed = i; return render(); }
-      cursor = i;
-      done(items[i].value);
-    });
-
     const onKey = (str, key = {}) => {
-      if (mouse.take(key)) return;
-      armed = null;
       if (key.ctrl && key.name === 'c') return done(null);
       if (key.name === 'up' || key.name === 'k') return move(-1);
       if (key.name === 'down' || key.name === 'j' || key.name === 'tab') return move(1);
@@ -352,11 +260,9 @@ export function checklist(title, items, { verb = 'sync' } = {}) {
     const box = (on) => (ascii ? (on ? '[x]' : '[ ]') : on ? '◉' : '○');
 
     const view = scroller();
-    let lineItem = [];
     const render = () => {
       if (drawn) stdout.write(`${ESC}${drawn}A${ESC}0J`);
       const lines = [];
-      lineItem = [];
       let at = 0;
       items.forEach((it, i) => {
         if (it.section) {
@@ -365,7 +271,6 @@ export function checklist(title, items, { verb = 'sync' } = {}) {
         }
         const on = i === cursor;
         if (on) at = lines.length;
-        lineItem[lines.length] = i;
         const mark = ticked.has(i) ? accent(box(true)) : dim(box(false));
         const label = it.hint ? pad(it.label, labelW) : it.label;
         const hint = it.hint ? `   ${dim(it.hint)}` : '';
@@ -375,31 +280,10 @@ export function checklist(title, items, { verb = 'sync' } = {}) {
         ['', dim(`  ${G.keys} · space tick · a all/none · enter ${ticked.size ? `${verb} ${ticked.size} ticked` : `${verb} the highlighted one`} · esc back`)]);
       stdout.write(shown.map((l) => fit(l)).join('\n') + '\n');
       drawn = shown.length;
-      lineAt = shown.line;
-      mouse.drawn(drawn);
     };
-
-    // A click ticks or clears the item under it; the wheel moves.
-    let lineAt = () => -1;
-    const mouse = pointer((button, row) => {
-      const at = pickable.indexOf(cursor);
-      if (button === 64) { cursor = pickable[Math.max(0, at - 1)]; return render(); }
-      if (button === 65) { cursor = pickable[Math.min(pickable.length - 1, at + 1)]; return render(); }
-      const i = lineItem[lineAt(row)];
-      if (button === 'hover') {
-        mouse.point(i !== undefined);
-        if (i !== undefined && i !== cursor) { cursor = i; render(); }
-        return;
-      }
-      if (button !== 0 || i === undefined) return;
-      cursor = i;
-      ticked.has(i) ? ticked.delete(i) : ticked.add(i);
-      render();
-    });
 
     const done = (value) => {
       stdin.removeListener('keypress', onKey);
-      mouse.off();
       if (stdin.isTTY) stdin.setRawMode(false);
       stdin.pause();
       stdout.write(`${ESC}${drawn}A${ESC}0J${ESC}?25h`);
@@ -410,7 +294,6 @@ export function checklist(title, items, { verb = 'sync' } = {}) {
     };
 
     const onKey = (str, key = {}) => {
-      if (mouse.take(key)) return;
       if (key.ctrl && key.name === 'c') return done(null);
       const at = pickable.indexOf(cursor);
       if (key.name === 'up' || key.name === 'k') { cursor = pickable[(at - 1 + pickable.length) % pickable.length]; return render(); }
@@ -454,8 +337,6 @@ export function prompt(question, { placeholder } = {}) {
 
 // Restore the cursor and the shell's screen even if the process dies mid-menu.
 process.on('exit', () => {
-  if (hand) realOut(shape('default'));
-  if (mouseOn) realOut(mouseOff);
   if (cursorHidden) realOut(`${ESC}?25h`);
   if (alt) realOut(`${ESC}?1049l`);
 });

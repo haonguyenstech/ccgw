@@ -14,7 +14,7 @@ import { interactive, select, checklist, prompt, panel, accent, banner, callout,
 import { syncSupported, officialCookies, cachedSession, cacheSession, claudeAi, gatewayStore, writeSession, removeSession, sessionUntouched, sessionExists, writeSpace, officialSkills, installSkills, installedSkills,
   gatewaySessions, gatewaySpaces, gatewayUserSkills, zipSkill, unzipSkill,
   readTurns, continuedTurns, unansweredQuestion, handoffFacts, briefPrompt, handoffDoc, handoffDocName, looksVietnamese } from '../src/sync.mjs';
-import { logo } from '../src/logo.mjs';
+import { logo, animateLogo } from '../src/logo.mjs';
 import { provider, claudeToken, timeLeft, statusLine, loginRunning, openLogin } from '../src/credential.mjs';
 import { checkForUpdate, cachedLatest, isNewer, installVersion } from '../src/update.mjs';
 import {
@@ -763,6 +763,15 @@ async function openBoth() {
   await official([]);
 }
 
+// Quits the gateway Desktop and the official one together; the gateway
+// itself keeps running (ccgw stop for that).
+async function quitBoth() {
+  const [gateway, off] = await Promise.all([quitDesktop(), officialSupported ? quitOfficial() : false]);
+  if (!gateway && !off) return console.log('neither Claude Desktop is running');
+  if (gateway) console.log(green('✓ gateway Claude Desktop quit'));
+  if (off) console.log(green('✓ official Claude Desktop quit') + dim('  (still signed in)'));
+}
+
 async function openGateway() {
   console.log(dim('Opening the gateway Claude Desktop…'));
   await start([], { soft: true, quiet: true });
@@ -907,6 +916,7 @@ async function desktop(args) {
   if (sub === 'official') return official(args.slice(1));
   if (sub === 'open') return openGateway();
   if (sub === 'both') return openBoth();
+  if (sub === 'quit-both') return quitBoth();
   if (sub === 'login') {
     await withDesktopClosed(() => setMode('1p'));
     console.log(green('✓ Claude Desktop switched to login mode') + dim('  (your claude.ai session is kept)'));
@@ -931,6 +941,7 @@ function help() {
   const art = logo(VERSION);
   console.log(`${art || `\n${bold('ccgw')} ${dim('v' + VERSION)} — use your Claude Code login as a gateway for Claude Desktop\n`}
   ccgw                         interactive menu (arrow keys + enter)
+  ccgw logo                    play the logo animation
   ccgw start [--port N] [-f]   start in background (-f: foreground)
   ccgw stop                    stop the gateway
   ccgw restart                 stop + start
@@ -954,6 +965,7 @@ function help() {
   ccgw desktop open            open the gateway Desktop (starts ccgw; restarts Desktop only if it needs switching)
   ccgw desktop official        open a second, claude.ai-signed-in Desktop next to the gateway one
   ccgw desktop both            open the gateway Desktop and the official one side by side
+  ccgw desktop quit-both       quit the gateway Desktop and the official one (the gateway keeps running)
   ccgw desktop official --sign-in | status | quit
 
   ccgw connector add clickup   add a connector to Claude Desktop (sign in via browser)
@@ -1063,6 +1075,7 @@ async function run(cmd, args) {
     case 'credential': case 'cred': return credential(args);
     case 'update': case 'upgrade': return update(args);
     case '-v': case '--version': case 'version': return console.log(VERSION);
+    case 'logo': return animateLogo(VERSION);
     case 'menu': return menu();
     default: return help();
   }
@@ -1076,6 +1089,8 @@ async function menu() {
   let last = null; // the item picked last; the first draw starts on "Update now" when there is one
   let output = ''; // what the last action printed
   screen.enter();
+  screen.clear();
+  await animateLogo(VERSION);
   try {
     while (true) {
       const cfg = readConfig();
@@ -1107,8 +1122,8 @@ async function menu() {
       const items = [
         ...(outdated ? [{ section: 'Update' }, { label: `${NEWS} Update now to v${latest}`, value: 'update', hint: `you have v${VERSION} · takes a few seconds, keeps your settings` }] : []),
         { section: 'Gateway' },
-        up ? { label: 'Stop', value: 'stop', confirm: true } : { label: 'Start', value: 'start', hint: 'needed for gateway mode' },
-        { label: 'Restart', value: 'restart', disabled: !up, confirm: true },
+        up ? { label: 'Stop', value: 'stop' } : { label: 'Start', value: 'start', hint: 'needed for gateway mode' },
+        { label: 'Restart', value: 'restart', disabled: !up },
         { label: 'Connection info', value: 'info', hint: 'URL + key for Claude Desktop' },
         ...(desktopSupported ? [
           { section: 'Claude Desktop' },
@@ -1116,6 +1131,7 @@ async function menu() {
           ...(officialSupported ? [
             { label: 'Open official Desktop', value: 'official', hint: officialSession() ? 'claude.ai, next to the gateway one' : 'sign in once with claude.ai' },
             { label: 'Open both', value: 'both', hint: 'gateway + claude.ai Desktop side by side' },
+            { label: 'Quit both', value: 'quit-both', disabled: !desktopRunning() && !officialRunning(), hint: 'gateway + claude.ai Desktop · the gateway keeps running' },
           ] : []),
           { label: 'Connectors…', value: 'connectors', hint: `${names.length} added` },
           ...(officialSupported && syncSupported ? [
@@ -1124,8 +1140,8 @@ async function menu() {
             { label: 'Add read-sync skill', value: 'skill-read-sync', hint: 'to claude.ai: "read sync" in a project reads its latest handoff note' },
           ] : []),
           bypassAll()
-            ? { label: 'Permission prompts: off', value: 'perms-ask', hint: 'turn back on (restarts Desktop)', confirm: true }
-            : { label: 'Permission prompts: on', value: 'perms-bypass', hint: 'bypass for all connectors (restarts Desktop)', confirm: true },
+            ? { label: 'Skip Permission: on', value: 'perms-ask', hint: 'turn off: Desktop asks before each tool again (restarts Desktop)' }
+            : { label: 'Skip Permission: off', value: 'perms-bypass', hint: 'turn on: tools of all connectors run without asking (restarts Desktop)' },
         ] : []),
         { section: 'ccgw' },
         ...(outdated ? [] : [{ label: 'Check for updates', value: 'check' }]),
@@ -1154,6 +1170,7 @@ async function menu() {
           case 'open-gateway': await openGateway(); break;
           case 'official': await official([]); break;
           case 'both': await openBoth(); break;
+          case 'quit-both': await quitBoth(); break;
           case 'connectors': await connectorMenu(); break;
           case 'sync': await sync([]); break;
           case 'handoff': await handoff([]); break;
