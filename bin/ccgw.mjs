@@ -108,7 +108,6 @@ async function start(args = [], { soft = false, quiet = false } = {}) {
     if (!claudePath) warn('Claude Code CLI not found. Install it (https://claude.com/claude-code), run `claude` and log in, then retry.');
     else {
       auth = claudeAuthStatus(claudePath);
-      const cred = provider(cfg);
       if (!auth?.loggedIn) warn(cred
         ? `Claude Code CLI is not logged in. Sign in with ${cred.name}: ccgw credential login`
         : 'Claude Code CLI is not logged in. Run `claude` and /login first.');
@@ -1086,7 +1085,6 @@ async function menu() {
       const names = connectors().map((c) => c.name);
       const latest = cachedLatest();
       const outdated = isNewer(latest, VERSION);
-      const cred = provider(cfg);
       const news = outdated ? [
         banner(`${NEWS}  ccgw v${latest} is available  ·  you have v${VERSION}  ·  pick "Update now" (enter)`),
         dim(`   what's new: ${RELEASES_URL}/tag/v${latest}`),
@@ -1096,7 +1094,6 @@ async function menu() {
         ['Gateway', up
           ? `${green('● running')}  ${dim(baseUrl(cfg))}${h.sessions ? dim(` · ${h.sessions} chat${h.sessions > 1 ? 's' : ''}`) : ''}`
           : `${red('○ stopped')}  ${dim('Claude Desktop cannot answer until it starts')}`],
-        ...(cred ? [['Login', `${cred.name}${(() => { const w = statusLine(cred); return w ? dim(` · ${w}`) : ''; })()}  ${loginLeft()}`]] : []),
         ...(desktopSupported ? [
           ['Desktop', mode === 'gateway' ? `${accent('◆')} gateway mode ${dim('(uses Claude Code)')}` : `◇ login mode ${dim('(claude.ai account)')}`],
           ...(officialSupported && (officialRunning() || officialSession())
@@ -1110,8 +1107,8 @@ async function menu() {
       const items = [
         ...(outdated ? [{ section: 'Update' }, { label: `${NEWS} Update now to v${latest}`, value: 'update', hint: `you have v${VERSION} · takes a few seconds, keeps your settings` }] : []),
         { section: 'Gateway' },
-        up ? { label: 'Stop', value: 'stop' } : { label: 'Start', value: 'start', hint: 'needed for gateway mode' },
-        { label: 'Restart', value: 'restart', disabled: !up },
+        up ? { label: 'Stop', value: 'stop', confirm: true } : { label: 'Start', value: 'start', hint: 'needed for gateway mode' },
+        { label: 'Restart', value: 'restart', disabled: !up, confirm: true },
         { label: 'Connection info', value: 'info', hint: 'URL + key for Claude Desktop' },
         ...(desktopSupported ? [
           { section: 'Claude Desktop' },
@@ -1127,8 +1124,8 @@ async function menu() {
             { label: 'Add read-sync skill', value: 'skill-read-sync', hint: 'to claude.ai: "read sync" in a project reads its latest handoff note' },
           ] : []),
           bypassAll()
-            ? { label: 'Permission prompts: off', value: 'perms-ask', hint: 'turn back on (restarts Desktop)' }
-            : { label: 'Permission prompts: on', value: 'perms-bypass', hint: 'bypass for all connectors (restarts Desktop)' },
+            ? { label: 'Permission prompts: off', value: 'perms-ask', hint: 'turn back on (restarts Desktop)', confirm: true }
+            : { label: 'Permission prompts: on', value: 'perms-bypass', hint: 'bypass for all connectors (restarts Desktop)', confirm: true },
         ] : []),
         { section: 'ccgw' },
         ...(outdated ? [] : [{ label: 'Check for updates', value: 'check' }]),

@@ -129,22 +129,55 @@ function fingerprint(messages) {
   return sha(norm.join('\u0002'));
 }
 
-// Flatten earlier turns into text, for starting a CLI session mid-conversation.
+// Images and documents a replayed history keeps as real blocks, newest first.
+const KEEP_MEDIA = 8;
+const KEEP_MEDIA_BYTES = 16 * 1024 * 1024;
+// Quoted content (a web page, a tool result) must not be able to close a turn
+// and open one that reads as the user's.
+const defang = (s) => String(s).replace(/<(\/?)(user|assistant|conversation_history)(?=[\s>])/gi, '‹$1$2');
+
+// Flatten earlier turns into prompt blocks, for starting a CLI session
+// mid-conversation: text, plus the most recent images and documents (older
+// ones become placeholders).
 function transcript(messages) {
-  const out = [];
-  for (const m of messages) {
-    const lines = [];
+  const media = [];
+  const turns = messages.map((m) => {
+    const parts = [];
     for (const b of blocks(m.content)) {
-      if (b.type === 'text') lines.push(b.text);
-      else if (b.type === 'tool_use') lines.push(`[called tool ${b.name} with ${JSON.stringify(b.input)}]`);
-      else if (b.type === 'tool_result') lines.push(`[tool result: ${toolResultText(b.content).slice(0, 20_000)}]`);
-      else if (b.type === 'image') lines.push('[image]');
-      else if (b.type === 'document') lines.push('[document]');
+      if (b.type === 'text') parts.push(defang(b.text));
+      else if (b.type === 'tool_use') parts.push(`[called tool ${b.name} with ${defang(JSON.stringify(b.input))}]`);
+      else if (b.type === 'tool_result') {
+        parts.push(`[tool result: ${defang(toolResultText(b.content).slice(0, 20_000))}]`);
+        for (const c of Array.isArray(b.content) ? b.content : []) if (c.type === 'image') parts.push(c), media.push(c);
+      } else if (b.type === 'image' || b.type === 'document') parts.push(b), media.push(b);
     }
-    if (lines.length) out.push(`<${m.role}>\n${lines.join('\n')}\n</${m.role}>`);
+    return { role: m.role, parts };
+  });
+  const keep = new Set();
+  let bytes = 0;
+  for (const b of media.reverse()) {
+    const size = b.source?.data?.length || 0;
+    if (keep.size >= KEEP_MEDIA || bytes + size > KEEP_MEDIA_BYTES) break;
+    keep.add(b);
+    bytes += size;
   }
-  return out.join('\n\n');
+  const out = [];
+  const text = (t) => (out.at(-1)?.type === 'text' ? (out.at(-1).text += t) : out.push({ type: 'text', text: t }));
+  for (const { role, parts } of turns) {
+    if (!parts.length) continue;
+    text(`<${role}>\n`);
+    for (const p of parts) {
+      if (typeof p === 'string') text(p + '\n');
+      else if (keep.has(p)) out.push({ type: p.type, source: p.source });
+      else text(`[${p.type}]\n`);
+    }
+    text(`</${role}>\n\n`);
+  }
+  return out;
 }
+
+const withHistory = (messages, note, content) =>
+  [{ type: 'text', text: '<conversation_history>\n' }, ...transcript(messages), { type: 'text', text: `</conversation_history>\n\n${note}` }, ...content];
 
 function toolResultText(content) {
   if (typeof content === 'string') return content;
@@ -204,6 +237,7 @@ class Session {
     this.input = inputChannel();
     this.q = null;
     this.fp = null; // fingerprint of the history this session has seen
+    this.fpLen = 0; // ... and how many messages that history is
     this.pending = new Map(); // toolUseId -> resolve, CLI blocked in our MCP handler
     this.handed = new Set(); // tool_use ids handed to Desktop, not yet answered
     this.results = new Map(); // toolUseId -> MCP result that arrived before the CLI asked
@@ -235,6 +269,9 @@ class Session {
         if (DEBUG) log(this.id, 'cli>', m.type, m.subtype || m.event?.type || '', m.event?.delta?.stop_reason || '', m.type === 'user' ? JSON.stringify(m.message.content).slice(0, 300) : '');
         if (m.type === 'stream_event') this.sink?.onEvent(m.event);
         else if (m.type === 'result') {
+          this.awaitingResult = false;
+          if (this.settle) { this.settle(); continue; }
+          if (this.sink?.staleResult) { this.sink.staleResult = false; continue; }
           if (m.is_error || m.subtype !== 'success') this.sink?.onError(m.errors?.join('; ') || m.result || m.subtype);
           this.sink?.onResult();
         } else if (m.type === 'assistant' && m.error) {
@@ -293,6 +330,7 @@ class Session {
 
   close() {
     this.dead = true;
+    this.onSettled?.();
     for (const resolve of this.pending.values()) resolve({ content: [{ type: 'text', text: 'cancelled' }], isError: true });
     this.pending.clear();
     this.input.close();
@@ -348,7 +386,12 @@ function refillSpare(key, system, builtins) {
   }
 }
 
-async function newSession(system, builtins) {
+// How often each system prompt started a conversation. A spare is only kept
+// for one seen before: most prompts (titles, per-chat context) come once, and
+// a spare for them just pushes a useful one out of the pool.
+const seen = new Map();
+
+async function newSession(system, builtins, oneShot) {
   const sysHash = sha(system);
   const key = spareKey(sysHash, builtins);
   // Claim the spare before awaiting it: concurrent requests must never share
@@ -357,7 +400,11 @@ async function newSession(system, builtins) {
   spares.delete(key);
   let w = spare ? await spare : null;
   if (!w) w = await spawnWarm(system, builtins);
-  refillSpare(key, system, builtins); // replace the one we just took
+  const count = (seen.get(key) || 0) + 1;
+  seen.delete(key);
+  seen.set(key, count);
+  if (seen.size > 100) seen.delete(seen.keys().next().value);
+  if (!oneShot && count > 1) refillSpare(key, system, builtins); // replace the one we just took
   const s = new Session(key, w.warm, w.mcp, w.state);
   s.start();
   sessions.set(s.id, s);
@@ -376,9 +423,9 @@ setInterval(evict, 60_000).unref();
 // Map CLI failures onto Messages-API error types so clients back off and retry
 // the ones that are transient.
 function classifyError(msg) {
-  if (/rate.?limit|usage limit|429/i.test(msg)) return [429, 'rate_limit_error'];
-  if (/overloaded|529/i.test(msg)) return [529, 'overloaded_error'];
-  if (/invalid_request|400/i.test(msg)) return [400, 'invalid_request_error'];
+  if (/rate.?limit|usage limit|\b429\b/i.test(msg)) return [429, 'rate_limit_error'];
+  if (/overloaded|\b529\b/i.test(msg)) return [529, 'overloaded_error'];
+  if (/invalid_request|\b400\b/i.test(msg)) return [400, 'invalid_request_error'];
   return [502, 'api_error'];
 }
 
@@ -499,6 +546,7 @@ class Sink {
   }
 
   onResult() {
+    this.gotResult = true;
     if (!this.done && this.started) this.finish();
   }
 
@@ -535,17 +583,39 @@ class Sink {
     this.session.busy = false;
     this.session.sink = null;
     this.session.lastUsed = Date.now();
+    // Ended before the CLI's result came: that result is still on its way.
+    if (e.delta.stop_reason !== 'tool_use' && !this.gotResult) this.session.awaitingResult = true;
     this.onDone?.(true, content);
   }
 
   abort() {
-    // Client went away mid-turn (user pressed stop). The CLI turn can't be
-    // resumed cleanly, so interrupt it and drop the session.
+    // Client went away mid-turn (user pressed stop). Interrupt the CLI turn but
+    // keep the session: the next message picks up here instead of replaying
+    // the whole conversation. It stays busy until the interrupted turn's
+    // result arrives, so that result can't be taken for the next turn's.
     this.done = true;
     clearInterval(this.ping);
-    log(this.session.id, 'client disconnected, interrupting');
-    this.session.q?.interrupt().catch(() => {});
-    this.session.close();
+    const s = this.session;
+    log(s.id, 'client disconnected, interrupting');
+    s.sink = null;
+    for (const resolve of s.pending.values()) resolve({ content: [{ type: 'text', text: 'cancelled' }], isError: true });
+    s.pending.clear();
+    s.handed.clear();
+    s.results.clear();
+    if (this.onAbort?.() === false) return;
+    let owed = s.awaitingResult ? 2 : 1; // an earlier turn's result may still be on its way too
+    const timer = setTimeout(() => { log(s.id, 'no result after interrupt, closing'); s.close(); }, 15_000);
+    s.settled = new Promise((r) => (s.onSettled = r));
+    s.settle = () => {
+      if (--owed > 0) return;
+      clearTimeout(timer);
+      s.settle = null;
+      s.onSettled();
+      s.busy = false;
+      s.awaitingResult = false;
+      s.lastUsed = Date.now();
+    };
+    s.q?.interrupt().catch((e) => { log(s.id, 'interrupt failed:', e.message); clearTimeout(timer); s.close(); });
   }
 }
 
@@ -585,16 +655,31 @@ async function handleMessages(req, res) {
     session = [...sessions.values()].find((s) => !s.dead && toolResults.some((b) => s.handed.has(b.tool_use_id)));
     if (session) resume = true;
   }
-  // 2) a plain follow-up in a conversation we already hold
+  // 2) a follow-up in a conversation we already hold. After a stop, the history
+  // also carries turns the session hasn't seen (the cut-off reply, the
+  // interruption note): those are the delta, sent ahead of the new message.
+  let delta = [];
   if (!session) {
-    const fp = fingerprint(messages.slice(0, -1));
-    session = [...sessions.values()].find((s) => !s.dead && !s.busy && s.sysHash === key && s.fp === fp && s.handed.size === 0);
+    const fps = new Map();
+    const fpOf = (n) => (fps.has(n) ? fps.get(n) : fps.set(n, fingerprint(messages.slice(0, n))).get(n));
+    session = [...sessions.values()]
+      .filter((s) => !s.dead && (!s.busy || s.settle) && s.sysHash === key && s.handed.size === 0 && s.fpLen < messages.length && s.fp === fpOf(s.fpLen))
+      .sort((a, b) => b.fpLen - a.fpLen)[0] || null;
+    if (session) delta = messages.slice(session.fpLen, -1);
+    // just stopped: wait for the interrupted turn to wind down
+    if (session?.settle) {
+      await Promise.race([session.settled, new Promise((r) => setTimeout(r, 5000))]);
+      if (session.busy || session.dead) [session, delta] = [null, []];
+    }
   }
   if (session?.busy) return json(res, 409, errBody('invalid_request_error', 'conversation is busy'));
 
+  // Desktop's side requests (chat titles and the like) are one non-streamed
+  // turn with no tools; their CLI process is closed as soon as they answer.
+  const oneShot = !req.stream && !(req.tools || []).length && !resume;
   let fresh = false;
   if (!session) {
-    session = await newSession(system, builtins);
+    session = await newSession(system, builtins, oneShot);
     fresh = true;
   }
   session.busy = true;
@@ -609,14 +694,25 @@ async function handleMessages(req, res) {
   }
 
   const sink = new Sink(res, req, session);
+  // The previous turn's result can arrive after its response ended (and after
+  // this request came in); it must not be taken for this turn's.
+  if (!resume) sink.staleResult = session.awaitingResult;
   session.sink = sink;
   sink.onDone = (ok, content) => {
+    if (oneShot && fresh) return setImmediate(() => session.close());
     if (!ok) return;
     session.fp = fingerprint([...messages, { role: 'assistant', content }]);
+    session.fpLen = messages.length + 1;
+  };
+  // Stopped mid-reply: the session has seen everything up to this request.
+  sink.onAbort = () => {
+    if (oneShot && fresh) return session.close(), false;
+    session.fp = fingerprint(messages);
+    session.fpLen = messages.length;
   };
 
-  const kind = resume ? 'tool-result' : fresh ? (messages.length > 1 ? 'new+history' : 'new') : 'follow-up';
-  log(session.id, kind, `model=${req._cliModel} msgs=${messages.length} tools=${(req.tools || []).length} stream=${!!req.stream}`);
+  const kind = resume ? 'tool-result' : fresh ? (messages.length > 1 ? 'new+history' : 'new') : delta.length ? `follow-up+${delta.length}` : 'follow-up';
+  log(session.id, kind, `model=${req._cliModel} msgs=${messages.length} tools=${(req.tools || []).length} stream=${!!req.stream} sys=${session.sysHash.slice(0, 8)}${oneShot && fresh ? ' one-shot' : ''}`);
 
   if (resume) {
     for (const b of toolResults) if (session.handed.has(b.tool_use_id)) session.deliver(b.tool_use_id, toMcpResult(b));
@@ -629,11 +725,11 @@ async function handleMessages(req, res) {
   }
 
   let content = toCliUserContent(last.content);
-  if (fresh && messages.length > 1) {
-    const hist = transcript(messages.slice(0, -1));
-    content = [{ type: 'text', text: `<conversation_history>\n${hist}\n</conversation_history>\n\nContinue the conversation above. The user's new message follows.` }, ...content];
-  }
-  if (!content.length) content = [{ type: 'text', text: toolResults.length ? transcript([last]) : '(empty)' }];
+  if (fresh && messages.length > 1)
+    content = withHistory(messages.slice(0, -1), "Continue the conversation above. The user's new message follows.", content);
+  else if (delta.length)
+    content = withHistory(delta, "These turns came after your last reply (it was cut off, so they include what the user saw of it). The user's new message follows.", content);
+  if (!content.length) content = toolResults.length ? transcript([last]) : [{ type: 'text', text: '(empty)' }];
   session.input.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null });
 }
 
@@ -665,7 +761,10 @@ function maybeOpenLogin(token, why) {
 // Returns an error message when the login has run out, else null.
 function credentialProblem() {
   if (!CRED) return null;
-  tokenCache.at = 0; // re-read on every request so a fresh sign-in is seen at once
+  // A cached valid token is only checked against the clock; an expired one is
+  // re-read on every request so a fresh sign-in is seen at once. (Reading the
+  // macOS Keychain blocks every stream for ~20ms.)
+  if (!tokenCache.token || tokenCache.token.expiresAt <= Date.now()) tokenCache.at = 0;
   const token = currentToken();
   if (!token || token.expiresAt > Date.now()) return null;
   const opened = maybeOpenLogin(token, 'login expired');
@@ -680,7 +779,7 @@ if (CRED) {
   log(`credential provider: ${CRED.name}${!t ? ' · no Claude Code login found' : t.expiresAt > Date.now() ? ` · login ${timeLeft(t.expiresAt)} left` : ' · login expired'}${CRED.autoLogin ? ' · auto sign-in on' : ''}`);
   setInterval(() => {
     const token = currentToken();
-    if (token && token.expiresAt - Date.now() < CRED.renewMinutes * 60_000) maybeOpenLogin(token, `login ${timeLeft(token.expiresAt)} left`);
+    if (token && token.expiresAt - Date.now() < CRED.renewMinutes * 60_000) maybeOpenLogin(token, token.expiresAt > Date.now() ? `login ${timeLeft(token.expiresAt)} left` : 'login expired');
   }, 60_000).unref();
 }
 
@@ -754,7 +853,9 @@ server.headersTimeout = 60_000;
 
 server.listen(PORT, HOST, () => {
   log(`ccgw v${VERSION} listening on http://${HOST}:${PORT} (claude: ${CLAUDE_PATH || 'bundled'})`);
-  refillSpare(spareKey(sha(''), []), '', []); // warm one generic process up front
+  // warm one generic process up front, and keep one warm after it is used
+  seen.set(spareKey(sha(''), []), 1);
+  refillSpare(spareKey(sha(''), []), '', []);
 });
 
 server.on('error', (e) => {
