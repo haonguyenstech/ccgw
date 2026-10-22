@@ -38,10 +38,11 @@ Chat, Cowork, tool calls and artifacts in Desktop all run through Claude Code, p
 - Desktop's **Configure third-party inference → Gateway** points at `http://127.0.0.1:8787`, and every request runs through your installed `claude`: your login, your plan, the newest CLI.
 - **Tool calls are bridged**, so Desktop's own tools, Cowork and artifacts work as usual.
 - **Fast follow-ups**: one CLI process stays alive per conversation, and a pre-warmed process is ready for the next new one.
+- **Stop keeps the session**: after Stop, the next message carries on in the same Claude Code session instead of rebuilding it from the transcript.
 - **1M context** models are exposed when your account has them (`expose1m`).
 
 ### 🖥️ One menu for everything
-Run `ccgw` with no arguments and you get a status panel (gateway, login, Desktop mode, connectors, permission prompts, version) above numbered actions. Every item is also a plain command for scripts.
+Run `ccgw` with no arguments: the logo plays in, then a status panel (gateway, Desktop mode, the official Desktop, connectors, permissions, version) sits above the actions. It is keyboard-only, so selecting text in the terminal works as usual. Every item is also a plain command for scripts.
 
 ### 🔁 Switch Desktop modes without logging out
 `ccgw desktop gateway` / `ccgw desktop login` flips Claude Desktop between the gateway and your claude.ai account. Both sessions survive the switch.
@@ -74,7 +75,7 @@ If a team tool keeps your Claude Code login fresh, ccgw shows who is signed in a
 ## Getting started
 
 ### Requirements
-- **Node.js 18.17+**
+- **Node.js 18.17+** (`ccgw sync` on Windows needs 22.5+)
 - **[Claude Code](https://docs.anthropic.com/en/docs/claude-code) CLI**, logged in (`claude` → `/login`)
 - **Claude Desktop**
 
@@ -118,17 +119,19 @@ ccgw
 
 | | |
 |---|---|
-| **1 · Status** | Is the gateway running, who is logged in and for how long, which mode Desktop is in, which connectors are added, whether permission prompts are on, and whether a newer ccgw exists. |
+| **1 · Status** | Is the gateway running (and how many chats it holds), which mode Desktop is in, whether the official Desktop is open and signed in, which connectors are added, whether permission prompts are skipped, and whether a newer ccgw exists. |
 | **2 · Gateway** | Start / stop / restart, show the URL and key. |
-| **3 · Claude Desktop** | Open the gateway Desktop, the official one, or both side by side; add or remove connectors; sync from and hand off to claude.ai; turn permission prompts on or off. |
-| **4 · Keys** | <kbd>↑</kbd>/<kbd>↓</kbd> move, <kbd>Enter</kbd> runs, a **number** jumps straight to an item, <kbd>Esc</kbd> goes back, <kbd>q</kbd> quits. |
+| **3 · Claude Desktop** | Open the gateway Desktop, the official one, or both side by side; *Quit both*; add or remove connectors; sync from and hand off to claude.ai (with when each last ran); *Skip Permission: on / off*. |
+| **4 · Keys** | <kbd>↑</kbd>/<kbd>↓</kbd> (or <kbd>j</kbd>/<kbd>k</kbd>, <kbd>Tab</kbd>) move, <kbd>PgUp</kbd>/<kbd>PgDn</kbd>/<kbd>Home</kbd>/<kbd>End</kbd> jump, <kbd>Enter</kbd> runs, <kbd>Esc</kbd> or <kbd>q</kbd> goes back / quits. Short lists (up to 9 items) also take a **number**. Long lists scroll. |
+
+When a newer ccgw is out, a bar on top of the menu says so and *Update now* comes first, with the cursor already on it. The logo animation takes about a second; any key skips it (macOS/Linux), and `CCGW_NO_ANIM=1` turns it off.
 
 ### 2. Connect Claude Desktop by hand (optional)
 
 `ccgw desktop gateway` does this for you. To set it up yourself, print the values:
 
 ```bash
-ccgw info              # or menu → 3 · Connection info
+ccgw info              # or menu → Connection info
 ```
 
 <img src=".github/assets/connection-info.png" width="680" alt="ccgw info output: the five values to paste into Claude Desktop" />
@@ -147,7 +150,7 @@ Then in Claude Desktop → **Settings → Configure third-party inference**, fil
 
 ### 3. Add a connector
 
-Open **6 · Connectors…** in the menu and pick one, or run `ccgw connector add <preset>`.
+Open **Connectors…** in the menu and pick one, or run `ccgw connector add <preset>`.
 
 <img src=".github/assets/connectors-menu.png" width="680" alt="Connectors menu: OAuth connectors signed in via browser, local servers, manage" />
 
@@ -164,7 +167,7 @@ For OAuth connectors, ccgw writes the entry, restarts Desktop and tells you how 
 
 ### 4. Skip permission prompts (optional)
 
-Desktop asks *"Claude wants to use …"* before every connector tool. See and change that per connector:
+Desktop asks *"Claude wants to use …"* before every connector tool. In the menu, **Skip Permission: on / off** switches it for every connector at once. From the terminal you can also do it per connector:
 
 ```bash
 ccgw permissions                       # show the setting per connector
@@ -355,7 +358,8 @@ flowchart LR
 - Serves `GET /v1/models`, `POST /v1/messages` (stream + non-stream) and `POST /v1/messages/count_tokens` (estimate). Listens on `127.0.0.1` only.
 - Each request runs through your installed `claude` via the Claude Agent SDK, so it uses your Claude Code login and the newest CLI version.
 - **Tool calling is bridged**: Desktop's tools are exposed to the CLI as an in-process MCP server. When the model calls one, the CLI blocks in that handler, the HTTP response ends with `stop_reason: tool_use`, and the next request's `tool_result` unblocks the same CLI process.
-- **Speed**: one CLI process per conversation stays alive, so a follow-up is a single prompt write (no history replay), and a pre-warmed process per recent system prompt removes spawn latency for new conversations.
+- **Speed**: one CLI process per conversation stays alive, so a follow-up is a single prompt write (no history replay), and a pre-warmed process removes spawn latency for new conversations. A spare is kept only for system prompts seen more than once; one-shot requests (chat titles, summaries) close their process right away.
+- **Stop**: an interrupted turn is settled in the same CLI process, and the next message continues that session with only the turns Desktop resends since.
 - Desktop/Cowork quirks handled: mid-conversation `role: "system"` messages, the client's `x-anthropic-billing-header` system block (stripped), tool names longer than 64 chars after the MCP prefix (aliased).
 - Errors map to Messages-API types (`rate_limit_error` 429, `overloaded_error` 529, …) so clients back off and retry.
 
@@ -374,7 +378,7 @@ Desktop reads the mode only when it starts, and keeps one process per data dir.
 
 - Usage counts against the Claude Code account's plan limits. Cowork sends a ~100K-token system prompt at the start of each conversation.
 - `temperature`, `max_tokens` and `stop_sequences` are not forwarded (the CLI owns sampling). Model and thinking budget are.
-- If Desktop edits history (retry/branch from an earlier message), the conversation restarts in a fresh CLI process with prior turns flattened to text, so images from earlier turns are dropped.
+- If Desktop edits history (retry/branch from an earlier message) or the gateway has restarted, the conversation is rebuilt in a fresh CLI process with prior turns flattened to text. The newest images and PDFs (up to 8, 16 MB) come along; older ones are dropped.
 - The gateway does not start at login; run `ccgw start` after a reboot.
 - `figma-local` is tested on macOS; on Windows it is untested with a real Figma Desktop.
 
@@ -385,6 +389,7 @@ Desktop reads the mode only when it starts, and keeps one process per data dir.
 | Command | |
 | --- | --- |
 | `ccgw` | interactive menu |
+| `ccgw logo` | play the logo animation |
 | `ccgw start [--port N] [-f]` | start in background (`-f` foreground) |
 | `ccgw stop` / `restart` / `status` | |
 | `ccgw info` | print Base URL / API key / auth scheme |
@@ -413,7 +418,9 @@ Desktop reads the mode only when it starts, and keeps one process per data dir.
 
 **Config** `~/.ccgw/config.json`: `port`, `host`, `maxSessions`, `sessionTtlMinutes`, `warmPool`, `expose1m`, `bypassPermissions`, optional `claudePath`.
 
-**Updating**: `ccgw update` installs the latest release and restarts the gateway if it was running; if Claude Desktop has conversations open it asks first (`--yes` skips the question). In the menu, **Check for updates** turns into **Update to vX.Y.Z** when one exists. `CCGW_NO_UPDATE_CHECK=1` turns the daily check off.
+**Updating**: `ccgw update` installs the latest release and restarts the gateway if it was running; if Claude Desktop has conversations open it asks first (`--yes` skips the question). In the menu, a newer release shows as a bar on top and **Update now to vX.Y.Z** first in the list; after other commands, a boxed notice. `CCGW_NO_UPDATE_CHECK=1` turns the daily check off.
+
+**Environment**: `CCGW_NO_ANIM=1` (still logo), `NO_COLOR` (no colour, still logo), `CCGW_NO_UPDATE_CHECK=1`, `CCGW_HOME` (instead of `~/.ccgw`).
 
 ---
 
@@ -423,14 +430,16 @@ Desktop reads the mode only when it starts, and keeps one process per data dir.
 npm install && npm link
 node test/smoke.mjs     # no Claude login needed
 node test/stress.mjs    # needs a running gateway + logged-in CLI
+node test/e2e.mjs       # Messages API calls through a running gateway
 CCGW_DEBUG=1 node src/server.mjs   # logs CLI events, dumps requests to ~/.ccgw/debug/
 ```
 
 ```
 bin/ccgw.mjs        CLI: commands, interactive menu, Desktop profile, connectors
 src/server.mjs      the gateway: Messages API ↔ Claude Agent SDK, tool bridge, warm pool
-src/menu.mjs        arrow-key select + prompts, no dependencies
-src/logo.mjs        the shaded terminal logo
+src/menu.mjs        keyboard select, checklist + prompts, alternate-screen menu, no dependencies
+src/logo.mjs        the shaded terminal logo and its intro animation
+src/sync.mjs        claude.ai sync + handoff (official Desktop session, chats, projects, skills)
 src/platform.mjs    Desktop paths and process control per OS
 src/credential.mjs  login from another tool
 src/gmail.mjs       local Gmail MCP server
