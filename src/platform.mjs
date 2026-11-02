@@ -110,18 +110,25 @@ export function officialDir() {
 export function officialDirCandidates(extra = []) {
   if (!IS_WIN || FAKE_DESKTOP) return [officialDir()];
   const real = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Claude');
-  const pkgs = path.join(process.env.LOCALAPPDATA || '', 'Packages');
+  const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const pkgs = path.join(local, 'Packages');
   let virt = null;
   try {
     const fam = fs.readdirSync(pkgs).find((d) => /^Claude_[a-z0-9]+$/i.test(d));
     if (fam) virt = path.join(pkgs, fam, 'LocalCache', 'Roaming', 'Claude');
+  } catch {}
+  // Newer Store builds (4.4212+) keep everything in %LOCALAPPDATA%\Claude-Data\<package family>.
+  let data = [];
+  try {
+    const root = path.join(local, 'Claude-Data');
+    data = fs.readdirSync(root).filter((d) => /^claude_[a-z0-9]+$/i.test(d)).map((d) => path.join(root, d));
   } catch {}
   const mtime = (f) => { try { return fs.statSync(f).mtimeMs; } catch { return 0; } };
   const score = (d) => [
     Math.max(mtime(path.join(d, 'Network', 'Cookies')), mtime(path.join(d, 'Cookies'))),
     Math.max(mtime(path.join(d, 'config.json')), mtime(path.join(d, 'Local State'))),
   ];
-  const dirs = [...new Set([virt, real, ...extra].filter((d) => d && fs.existsSync(d)).map((d) => path.resolve(d)))];
+  const dirs = [...new Set([...data, virt, real, ...extra].filter((d) => d && fs.existsSync(d)).map((d) => path.resolve(d)))];
   return dirs.map((d) => ({ d, s: score(d) })).sort((a, b) => (b.s[0] - a.s[0]) || (b.s[1] - a.s[1])).map((x) => x.d);
 }
 

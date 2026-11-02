@@ -205,6 +205,7 @@ ccgw sync --list                       # what there is, and how much is new
 
 - **Projects** become gateway projects of the same name. Their instructions and knowledge files go in `~/Claude/Projects/<name>`, the project's folder, and their chats sit inside them.
 - **Chats** become Cowork tasks you can open and continue. They come over as text: images and PDFs stay on claude.ai, and only the branch claude.ai shows is copied.
+- **Cowork tasks** the official Desktop ran in the cloud (they are sessions, not chats, so claude.ai lists them apart) come over the same way, inside their project: your prompts and Claude's answers, each tool call as one line. A copy opens on the folders the task used on this machine. `--list` counts them next to the chats.
 - **Skills** on the account that the gateway Desktop lacks (skill-creator, mcp-builder, deep-research, …, enabled or not) are installed as one local plugin, `claude-ai-skills`.
 - Running it again only brings what changed. A chat updated on claude.ai replaces its gateway copy, unless you continued that copy in the gateway; then the new version comes in next to it.
 
@@ -240,7 +241,7 @@ Connectors live in the "Claude Code (ccgw)" profile, so they work the same on ma
 | `clickup`, `linear`, `notion`, `atlassian` (Jira/Confluence), `sentry`, `figma` | the provider's remote MCP server | OAuth in the browser, from Desktop |
 | `gmail` | local MCP server over the Gmail API | your own Google OAuth client, once |
 | `figma-local` | Figma Desktop through a plugin, **no plan limits** | none; run the plugin in Figma |
-| `refigma` | Figma links → HTML / React + Tailwind, SVG, tokens via [refigma-mcp](https://github.com/haonguyenstech/refigma-mcp); a **View seat** is enough | macOS: your figma.com session in Edge; Windows: sign in once in an Edge window |
+| `refigma` | Figma links → HTML / React + Tailwind, SVG, tokens via [refigma-mcp](https://github.com/saigontechnology/refigma-mcp); a **View seat** is enough | macOS: your figma.com session in Edge; Windows: sign in once in an Edge window |
 
 > 🪪 **The official Desktop too.** `ccgw connector add refigma --official` (or *Connectors… → Official Desktop*) puts a local connector in the claude.ai-signed-in Desktop instead, in its own `claude_desktop_config.json`. Only the official Desktop is restarted, and it stays signed in; the gateway Desktop and its profile are left alone. Remote connectors for that one come from your claude.ai account (its *Settings → Connectors*), so `--official` takes only `refigma`, `gmail` and `figma-local`, and they run in that Desktop on this machine, not on claude.ai web or mobile.
 
@@ -305,11 +306,11 @@ How it works: it is [Talk to Figma](https://github.com/grab/cursor-talk-to-figma
 <details>
 <summary><b>Figma links to code, any seat (<code>refigma</code>)</b></summary>
 
-`figma-local` needs a seat that can run plugins. [refigma-mcp](https://github.com/haonguyenstech/refigma-mcp) reads a Figma link through a headless Microsoft Edge signed in to figma.com, so a View seat works and nothing counts against an API quota. It returns the layout tree, HTML / React + Tailwind, SVG icons, design tokens and Figma's own PNG, and can pixel-diff your implementation against that PNG. It only reads; it does not edit designs.
+`figma-local` needs a seat that can run plugins. [refigma-mcp](https://github.com/saigontechnology/refigma-mcp) reads a Figma link through a headless Microsoft Edge signed in to figma.com, so a View seat works and nothing counts against an API quota. It returns the layout tree, HTML / React + Tailwind, SVG icons, design tokens and Figma's own PNG, and can pixel-diff your implementation against that PNG. It only reads; it does not edit designs.
 
 ```bash
 ccgw connector add refigma                        # latest release, via npx
-ccgw connector add refigma --version 0.4.0        # pin a release
+ccgw connector add refigma --version 0.6.0        # pin a release
 ccgw connector add refigma --path ~/refigma-mcp   # run a local checkout
 ```
 

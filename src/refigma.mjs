@@ -1,4 +1,4 @@
-// refigma-mcp (github.com/haonguyenstech/refigma-mcp) reads Figma frames through a
+// refigma-mcp (github.com/saigontechnology/refigma-mcp) reads Figma frames through a
 // headless Edge signed in to figma.com — no REST quota, plugin or Edit seat — and
 // turns them into a layout tree, HTML / React + Tailwind, SVG, tokens and PNG.
 // It is a separate stdio server; ccgw only writes the Desktop entry that runs it,
@@ -9,8 +9,8 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { IS_MAC, IS_WIN } from './platform.mjs';
 
-const REPO = 'haonguyenstech/refigma-mcp';
-const FALLBACK_VERSION = '0.5.0';   // the first release that runs on Windows
+const REPO = 'saigontechnology/refigma-mcp';
+const FALLBACK_VERSION = '0.6.0';   // used only when GitHub can't be asked for the latest
 const MIN_NODE = [22, 15];
 
 function edgeFound() {

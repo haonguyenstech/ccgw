@@ -224,6 +224,36 @@ try {
     check('sync installs skills as an uploaded plugin', fs.existsSync(path.join(plug, 'skills', 'morning', 'SKILL.md'))
       && inst.plugins['claude-ai-skills@local-desktop-app-uploads'][0].installPath === plug && enabled['claude-ai-skills@local-desktop-app-uploads'] === true
       && store.builtinSkills.has('docx'));
+    // sync: a Cowork task the official Desktop ran in the cloud (a session, not a chat).
+    check('sync decodes tagged ids', S.taggedUuid('user', 'user_018HLFsqEbptnJnLiiJtAvzn') === '3af7bcf8-ee97-4bb4-898c-8c63cf42ea83'
+      && S.coworkProject({ chat_project_id: 'claude_proj_018HLFsqEbptnJnLiiJtAvzn' }) === '3af7bcf8-ee97-4bb4-898c-8c63cf42ea83'
+      && S.coworkProject({ chat_project_id: 'cowork_proj_x' }) === null);
+    const taskDir = path.join(d3p, 'Arkhe');
+    fs.mkdirSync(taskDir);
+    const offDir = path.join(d3p, 'official');
+    fs.mkdirSync(path.join(offDir, 'local-agent-mode-sessions', acct, 'org1'), { recursive: true });
+    fs.writeFileSync(path.join(offDir, 'local-agent-mode-sessions', acct, 'org1', 'remote-session-spaces.json'),
+      JSON.stringify({ entries: [{ sessionId: 'cse_01Abc', folders: [taskDir, path.join(d3p, 'gone')] }] }));
+    const taskFolders = S.taskFolders(S.officialTaskFolders(offDir), 'session_01Abc');
+    const task = { id: 'session_01Abc', title: 'M3/M4 scope', created_at: '2026-10-20T01:00:00Z', updated_at: '2026-10-20T02:00:00Z', tags: ['cowork-remote'], chat_project_id: 'claude_proj_018HLFsqEbptnJnLiiJtAvzn' };
+    const tconv = S.coworkConversation(task, [
+      { type: 'system', subtype: 'init' },
+      { type: 'user', uuid: 'u1', message: { role: 'user', content: 'cut the scope' }, created_at: '2026-10-20T01:00:00Z' },
+      { type: 'assistant', uuid: 'a1', message: { content: [{ type: 'thinking', thinking: 'hmm' }, { type: 'text', text: 'Reading the sheet.' }, { type: 'tool_use', name: 'Read', input: { file_path: 'C:/Arkhe/stories.xlsx' } }] } },
+      { type: 'user', uuid: 'r1', message: { content: [{ type: 'tool_result', content: 'rows' }] } },
+      { type: 'assistant', uuid: 'x1', parent_tool_use_id: 'toolu_1', message: { content: [{ type: 'text', text: 'subagent chatter' }] } },
+      { type: 'assistant', uuid: 'a2', message: { content: [{ type: 'text', text: 'Dropped 3 stories.' }] } },
+      { type: 'result', subtype: 'success' },
+    ]);
+    const trec = S.writeSession(store, tconv, { space, folders: taskFolders });
+    const tmeta = JSON.parse(fs.readFileSync(path.join(store.base, `${trec.session}.json`), 'utf8'));
+    const ttr = fs.readFileSync(path.join(store.base, trec.session.slice(6, 14), '.claude/projects/session', `${tmeta.cliSessionId}.jsonl`), 'utf8');
+    check('sync turns a Cowork task into a chat', tconv.chat_messages.length === 2 && tconv.project_uuid === '3af7bcf8-ee97-4bb4-898c-8c63cf42ea83'
+      && ttr.includes('Reading the sheet.') && ttr.includes('[Read: C:/Arkhe/stories.xlsx]') && ttr.includes('Dropped 3 stories.')
+      && !ttr.includes('subagent chatter') && !ttr.includes('hmm') && tmeta.title === 'M3/M4 scope');
+    check('sync opens a Cowork task on its folders', JSON.stringify(tmeta.userSelectedFolders) === JSON.stringify([space.folder, taskDir]));
+    S.removeSession(store, trec.session);
+
     S.removeSession(store, rec.session);
     check('sync removes a session', !fs.existsSync(sdir) && !fs.existsSync(path.join(store.base, `${rec.session}.json`)));
     // handoff: gateway tasks as it lists them.

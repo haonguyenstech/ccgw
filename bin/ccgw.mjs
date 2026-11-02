@@ -12,6 +12,7 @@ import { installFigma, serveFigma, figmaStatus, registerPlugin, pluginRegistered
 import { latestVersion, requirements, supportsPlatform, refigmaEntry, entryVersion, probe, findPython, installPython } from '../src/refigma.mjs';
 import { interactive, select, checklist, prompt, panel, accent, banner, callout, NEWS, ago, screen, lastLines } from '../src/menu.mjs';
 import { syncSupported, officialCookies, cachedSession, cacheSession, claudeAi, gatewayStore, writeSession, removeSession, sessionUntouched, sessionExists, writeSpace, officialSkills, installSkills, installedSkills,
+  coworkConversation, coworkProject, officialTaskFolders, taskFolders,
   gatewaySessions, gatewaySpaces, gatewayUserSkills, zipSkill, unzipSkill,
   readTurns, continuedTurns, unansweredQuestion, handoffFacts, briefPrompt, handoffDoc, handoffDocName, looksVietnamese } from '../src/sync.mjs';
 import { logo, animateLogo } from '../src/logo.mjs';
@@ -1295,7 +1296,10 @@ const SESSION_CACHE = path.join(HOME_DIR, 'official-session.bin');
 // file while open, so the first sync closes it for a moment (it stays signed
 // in) and keeps the sign-in sealed for the next ones.
 async function officialApi() {
-  const cached = IS_WIN ? cachedSession(OFFICIAL_DIR, SESSION_CACHE) : null;
+  // Sealed with the key of whichever data dir held the sign-in, which need
+  // not be the first guess.
+  const cached = IS_WIN && fs.existsSync(SESSION_CACHE)
+    ? [OFFICIAL_DIR, ...officialDirCandidates()].reduce((hit, d) => hit || cachedSession(d, SESSION_CACHE), null) : null;
   if (cached) {
     const api = claudeAi(cached);
     if (await api.projects().then(() => true, () => false)) return api;
@@ -1365,16 +1369,28 @@ async function sync(args) {
   if (since && !Number.isFinite(sinceMs)) fail('--since takes a number of days, e.g. --since 7');
 
   console.log(dim(`Reading claude.ai through the official Desktop’s sign-in${IS_WIN ? '' : ' (macOS may ask for the "Claude Safe Storage" Keychain item: click Allow)'}…`));
-  let api, convs, projects;
+  let api, convs, projects, tasks;
   try {
     api = await officialApi();
-    [convs, projects] = await Promise.all([api.conversations(), api.projects()]);
+    // Cowork tasks the official Desktop ran in the cloud are sessions, not
+    // chats; if claude.ai won't list them the chats still come over.
+    [convs, projects, tasks] = await Promise.all([api.conversations(), api.projects(), api.coworkSessions().catch((e) => ({ error: e }))]);
   } catch (e) {
     fail(e.message);
   }
-  convs = convs.filter((c) => !sinceMs || new Date(c.updated_at).getTime() >= sinceMs);
+  const tasksError = tasks?.error;
+  if (tasksError) { console.log(dim(`  (could not list the Cowork tasks: ${tasksError.message})`)); tasks = []; }
+  // Each task in the claude.ai chat shape: uuid, name, dates, project_uuid.
+  tasks = tasks.map((t) => ({ uuid: t.id, name: t.title || 'Cowork task', created_at: t.created_at, updated_at: t.updated_at || t.created_at, project_uuid: coworkProject(t), task: t }));
+  const recent = (c) => !sinceMs || new Date(c.updated_at).getTime() >= sinceMs;
+  convs = convs.filter(recent);
+  tasks = tasks.filter(recent);
   const inProject = (id) => convs.filter((c) => c.project_uuid === id);
+  const tasksIn = (id) => tasks.filter((c) => c.project_uuid === id);
   const outside = convs.filter((c) => !c.project_uuid || !projects.some((p) => p.uuid === c.project_uuid));
+  const tasksOutside = tasks.filter((c) => !c.project_uuid || !projects.some((p) => p.uuid === c.project_uuid));
+  // "3 chats · 4 Cowork tasks", leaving out what there is none of.
+  const counted = (cs, ts) => [plural(cs.length, 'chat'), ts.length && plural(ts.length, 'Cowork task')].filter(Boolean).join(' · ');
   const store = gatewayStore(desktop3pDir());
   // Every skill on the account, enabled or not; the official Desktop's local copy if that fails.
   const skills = (await api.skills().catch(() => null) ?? officialSkills(OFFICIAL_DIR)).filter((s) => !store.builtinSkills.has(s.name));
@@ -1385,8 +1401,11 @@ async function sync(args) {
   const fresh = (list) => list.filter((c) => state.conversations[c.uuid]?.updatedAt !== c.updated_at).length;
 
   if (listOnly) {
-    for (const p of projects) console.log(`  ${cyan(p.name.padEnd(28))} ${plural(inProject(p.uuid).length, 'chat')} ${dim(`(${fresh(inProject(p.uuid))} new or changed)`)}`);
-    console.log(`  ${cyan('Chats outside projects'.padEnd(28))} ${plural(outside.length, 'chat')} ${dim(`(${fresh(outside)} new or changed)`)}`);
+    for (const p of projects) {
+      const all = [...inProject(p.uuid), ...tasksIn(p.uuid)];
+      console.log(`  ${cyan(p.name.padEnd(28))} ${counted(inProject(p.uuid), tasksIn(p.uuid))} ${dim(`(${fresh(all)} new or changed)`)}`);
+    }
+    console.log(`  ${cyan('Chats outside projects'.padEnd(28))} ${counted(outside, tasksOutside)} ${dim(`(${fresh([...outside, ...tasksOutside])} new or changed)`)}`);
     console.log(`  ${cyan('Skills'.padEnd(28))} ${skillHint}`);
     return;
   }
@@ -1406,9 +1425,9 @@ async function sync(args) {
   } else if (interactive()) {
     picked = await checklist(`${bold('Sync from the official Desktop')}  ${dim('claude.ai → gateway · tick what to copy')}`, [
       { section: 'Projects' },
-      ...projects.map((p) => ({ label: p.name, value: p.uuid, hint: `${plural(inProject(p.uuid).length, 'chat')} · ${fresh(inProject(p.uuid))} new or changed`})),
+      ...projects.map((p) => ({ label: p.name, value: p.uuid, hint: `${counted(inProject(p.uuid), tasksIn(p.uuid))} · ${fresh([...inProject(p.uuid), ...tasksIn(p.uuid)])} new or changed`})),
       { section: 'Other' },
-      { label: 'Chats outside projects', value: OUTSIDE, hint: `${plural(outside.length, 'chat')} · ${fresh(outside)} new or changed` },
+      { label: 'Chats outside projects', value: OUTSIDE, hint: `${counted(outside, tasksOutside)} · ${fresh([...outside, ...tasksOutside])} new or changed` },
       { label: 'Skills', value: SKILLS, hint: skillHint },
     ]);
     if (!picked) return console.log(dim('Sync cancelled.'));
@@ -1422,11 +1441,25 @@ async function sync(args) {
   for (const p of projects.filter((x) => picked.includes(x.uuid))) {
     spaces.push({ project: { ...p, ...(await api.project(p.uuid)) }, docs: await api.docs(p.uuid).catch(() => []) });
   }
-  const chosen = [...projects.filter((p) => picked.includes(p.uuid)).flatMap((p) => inProject(p.uuid)), ...(picked.includes(OUTSIDE) ? outside : [])];
+  const pickedProjects = projects.filter((p) => picked.includes(p.uuid));
+  const chosen = [
+    ...pickedProjects.flatMap((p) => [...inProject(p.uuid), ...tasksIn(p.uuid)]),
+    ...(picked.includes(OUTSIDE) ? [...outside, ...tasksOutside] : []),
+  ];
   const changed = chosen.filter((c) => !(state.conversations[c.uuid] && sessionExists(store, state.conversations[c.uuid]) && state.conversations[c.uuid].updatedAt === c.updated_at));
+  // The folders each Cowork task was opened on here, so its copy opens on them too.
+  const taskDirs = changed.some((c) => c.task) ? officialTaskFolders(OFFICIAL_DIR) : new Map();
+  let failedTasks = 0;
   for (const [i, c] of changed.entries()) {
-    process.stdout.write(dim(`\r  fetching chats ${i + 1}/${changed.length}…`));
-    todo.push(await api.conversation(c.uuid));
+    process.stdout.write(dim(`\r  fetching chats and tasks ${i + 1}/${changed.length}…`));
+    if (!c.task) { todo.push(await api.conversation(c.uuid)); continue; }
+    try {
+      const conv = coworkConversation(c.task, await api.coworkEvents(c.task.id));
+      if (conv.chat_messages.length) todo.push({ ...conv, folders: taskFolders(taskDirs, c.task.id) });
+    } catch (e) {
+      failedTasks++;
+      process.stdout.write(`\r\x1b[K  ${red('!')} Cowork task "${c.name}": ${e.message}\n`);
+    }
   }
   if (changed.length) process.stdout.write('\r\x1b[K');
 
@@ -1460,7 +1493,7 @@ async function sync(args) {
         else counts.kept++;
       }
       if (!sid && !(prev && sessionExists(store, prev))) counts.added++;
-      state.conversations[conv.uuid] = writeSession(store, conv, { sid: sid || undefined, space: spaceOf(conv) });
+      state.conversations[conv.uuid] = { ...writeSession(store, conv, { sid: sid || undefined, space: spaceOf(conv), folders: conv.folders || [] }), ...(conv.folders && { kind: 'cowork' }) };
     }
     if (skillDirs.length) { installSkills(store, skillDirs, VERSION); counts.skills = skillDirs.length; }
     state.lastSync = new Date().toISOString();
@@ -1487,6 +1520,8 @@ async function sync(args) {
   if (skillTmp) fs.rmSync(skillTmp, { recursive: true, force: true });
   if (!restart && desktopRunning()) console.log(dim('  Restart the gateway Desktop to see them (ccgw desktop open after quitting it).'));
   console.log(dim('  Chats come over as text: images and PDFs stay on claude.ai, and only the branch shown there is copied.'));
+  if (todo.some((c) => c.folders)) console.log(dim('  Cowork tasks come over the same way, each tool call as one line, opening on the folders they used here.'));
+  if (failedTasks) console.log(dim(`  ${plural(failedTasks, 'Cowork task')} could not be read; sync again to retry.`));
 }
 
 // Handoff's claude.ai project for chats outside any gateway project.

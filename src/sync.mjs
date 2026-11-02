@@ -132,6 +132,79 @@ export function cacheSession(officialDir, file, jar) {
   fs.writeFileSync(file, encrypt(JSON.stringify(jar), officialDir), { mode: 0o600 });
 }
 
+// claude.ai's /v1 sessions API, as its web app calls it.
+const CCR_HEADERS = { 'anthropic-version': '2023-06-01', 'anthropic-beta': 'ccr-byoc-2025-07-29', 'anthropic-client-feature': 'ccr' };
+const COWORK_TAG = 'cowork-remote';
+
+// Tagged ids: "<kind>_01" + the UUID in base58 (user_018HLF…, claude_proj_01…).
+const B58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+export function taggedUuid(kind, id) {
+  const m = typeof id === 'string' && id.match(new RegExp(`^${kind}_01([${B58}]{1,22})$`));
+  if (!m) return null;
+  let n = 0n;
+  for (const ch of m[1]) n = n * 58n + BigInt(B58.indexOf(ch));
+  const hex = n.toString(16).padStart(32, '0');
+  return hex.length > 32 ? null : `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+export const coworkProject = (s) => taggedUuid('claude_proj', s.chat_project_id);
+
+// session_01X and cse_01X name the same task (the web app swaps the prefix).
+const taskKey = (id) => String(id || '').replace(/^(session|cse)_/, '');
+export const taskFolders = (folders, id) => folders.get(taskKey(id)) || [];
+
+// The folders each cloud task was given on this machine, which only the
+// official Desktop knows: remote-session-spaces.json in each org dir.
+export function officialTaskFolders(officialDir) {
+  const out = new Map();
+  const root = path.join(officialDir, 'local-agent-mode-sessions');
+  const dirs = (d) => { try { return fs.readdirSync(d, { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => path.join(d, e.name)); } catch { return []; } };
+  for (const acct of dirs(root)) {
+    for (const org of dirs(acct)) {
+      for (const e of readJson(path.join(org, 'remote-session-spaces.json'), {})?.entries || []) {
+        if (!e?.sessionId || !Array.isArray(e.folders)) continue;
+        const k = taskKey(e.sessionId);
+        out.set(k, [...new Set([...(out.get(k) || []), ...e.folders.filter((f) => typeof f === 'string')])]);
+      }
+    }
+  }
+  return out;
+}
+
+// A cloud task's transcript in the shape of a claude.ai chat, for
+// writeSession: each prompt of yours, then one answer holding everything
+// Claude said and did until the next prompt (tools as one line each).
+export function coworkConversation(s, events) {
+  const msgs = [];
+  let answer = null;
+  const at = (e) => e.created_at || e.timestamp || s.updated_at || s.created_at;
+  for (const e of events) {
+    if (e.isSidechain || e.parent_tool_use_id || e.isMeta || !e.message) continue;
+    const c = e.message.content;
+    if (e.type === 'user') {
+      const blocks = typeof c === 'string' ? [{ type: 'text', text: c }] : (Array.isArray(c) ? c : []);
+      const text = blocks.filter((b) => b?.type === 'text' && typeof b.text === 'string').map((b) => b.text).join('\n').trim();
+      if (!text || blocks.some((b) => b?.type === 'tool_result')) continue; // tool output, not you
+      answer = null;
+      msgs.push({ uuid: e.uuid || crypto.randomUUID(), sender: 'human', created_at: at(e), content: [{ type: 'text', text }] });
+    } else if (e.type === 'assistant') {
+      const parts = [];
+      for (const b of Array.isArray(c) ? c : []) {
+        if (b?.type === 'text' && b.text?.trim()) parts.push(b.text.trim());
+        else if (b?.type === 'tool_use') parts.push(toolLine({ name: b.name || 'tool', input: b.input || {} }));
+      }
+      if (!parts.length) continue;
+      if (!answer) msgs.push(answer = { uuid: e.uuid || crypto.randomUUID(), sender: 'assistant', created_at: at(e), content: [] });
+      answer.content.push({ type: 'text', text: parts.join('\n\n') });
+    }
+  }
+  for (let i = 0; i < msgs.length; i++) msgs[i].parent_message_uuid = i ? msgs[i - 1].uuid : null;
+  for (const m of msgs) if (m.content.length > 1) m.content = [{ type: 'text', text: m.content.map((b) => b.text).join('\n\n') }];
+  return {
+    uuid: s.id, name: s.title || 'Cowork task from claude.ai', created_at: s.created_at, updated_at: s.updated_at || s.created_at,
+    project_uuid: coworkProject(s), chat_messages: msgs, current_leaf_message_uuid: msgs.at(-1)?.uuid ?? null,
+  };
+}
+
 export function claudeAi({ sessionKey, lastActiveOrg }) {
   // Cloudflare lets the Desktop app's user agent through; a plain browser one gets a challenge.
   const headers = {
@@ -139,12 +212,14 @@ export function claudeAi({ sessionKey, lastActiveOrg }) {
     'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Claude/1.0 Chrome/140.0.0.0 Electron/38.0.0 Safari/537.36',
   };
   // Resolves to the parsed body (null when empty), or throws with claude.ai's error code.
-  const call = async (method, p, body, { raw = false } = {}) => {
+  // `v1`: a /v1 path (Cowork's cloud sessions), which takes the org as a header.
+  const call = async (method, p, body, { raw = false, v1 = false } = {}) => {
     for (let attempt = 0; ; attempt++) {
       const json = body !== undefined && !(body instanceof FormData);
-      const r = await fetch(`https://claude.ai/api/${p}`, {
+      const h = v1 ? { ...headers, ...CCR_HEADERS, 'x-organization-uuid': await orgId() } : headers;
+      const r = await fetch(v1 ? `https://claude.ai/${p}` : `https://claude.ai/api/${p}`, {
         method, body: json ? JSON.stringify(body) : body,
-        headers: json ? { ...headers, 'content-type': 'application/json' } : headers,
+        headers: json ? { ...h, 'content-type': 'application/json' } : h,
       });
       if (r.ok) {
         if (raw) return Buffer.from(await r.arrayBuffer());
@@ -173,6 +248,31 @@ export function claudeAi({ sessionKey, lastActiveOrg }) {
       }
     },
     conversation: async (id) => get(await o(`chat_conversations/${id}?tree=True&rendering_mode=messages&render_all_tools=true`)),
+    // Cowork tasks the official Desktop ran in the cloud (session_… ids): not
+    // chats, so chat_conversations never lists them.
+    async coworkSessions() {
+      const all = [];
+      let cursor = '';
+      for (let i = 0; i < 50; i++) {
+        const page = await call('GET', `v1/code/sessions?tags=${COWORK_TAG}&limit=200${cursor && `&cursor=${encodeURIComponent(cursor)}`}`, undefined, { v1: true });
+        all.push(...(page?.data || []));
+        if (!page?.next_cursor) break;
+        cursor = page.next_cursor;
+      }
+      return all.filter((s) => (s.tags || []).includes(COWORK_TAG) && s.status !== 'archived' && s.session_status !== 'archived');
+    },
+    // A cloud task's transcript: the SDK messages it streamed, oldest first.
+    async coworkEvents(id) {
+      const out = [];
+      let cursor = '';
+      for (let i = 0; i < 200; i++) {
+        const page = await call('GET', `v1/code/sessions/${encodeURIComponent(id)}/events?limit=500&sort_order=asc${cursor && `&cursor=${encodeURIComponent(cursor)}`}`, undefined, { v1: true });
+        for (const e of page?.data || []) if (e?.payload) out.push({ ...e.payload, created_at: e.payload.created_at ?? e.created_at });
+        if (!page?.next_cursor) break;
+        cursor = page.next_cursor;
+      }
+      return out;
+    },
     projects: async () => (await get(await o('projects?limit=200'))).filter((p) => !p.archived_at),
     project: async (id) => get(await o(`projects/${id}`)),
     docs: async (id) => get(await o(`projects/${id}/docs`)),
@@ -181,7 +281,18 @@ export function claudeAi({ sessionKey, lastActiveOrg }) {
     addDoc: async (id, fileName, content) => call('POST', await o(`projects/${id}/docs`), { file_name: fileName, content }),
     deleteProject: async (id) => call('DELETE', await o(`projects/${id}`)).catch((e) => { if (e.status !== 404) throw e; }),
     deleteDoc: async (id, doc) => call('DELETE', await o(`projects/${id}/docs/${doc}`)).catch((e) => { if (e.status !== 404) throw e; }),
-    skills: async () => (await get(await o('skills/list-skills?include_wiggle_skills=true&entrypoint=local-agent'))).skills || [],
+    // The Cowork listing (entrypoint=local-agent) has the built-in ones
+    // (docx, pdf, …) but leaves out skills you made yourself (creator_type
+    // "user", kept as a plugin); the plain listing has those. Both, by name.
+    async skills() {
+      const [cowork, plain] = await Promise.all([
+        get(await o('skills/list-skills?include_wiggle_skills=true&entrypoint=local-agent')),
+        get(await o('skills/list-skills')).catch(() => null),
+      ]);
+      const all = [...(cowork?.skills || [])];
+      for (const s of plain?.skills || []) if (!all.some((x) => x.name === s.name)) all.push(s);
+      return all;
+    },
     downloadSkill: async (id) => call('GET', await o(`skills/download-dot-skill-file?skill_id=${encodeURIComponent(id)}&entrypoint=local-agent`), undefined, { raw: true }),
     // "added", or "exists" when the account already has a skill of that name.
     async uploadSkill(name, zip, { overwrite = false } = {}) {
@@ -291,7 +402,9 @@ const NAMES = ['turing', 'lovelace', 'hopper', 'knuth', 'ritchie', 'shannon', 'c
 const pick = (a) => a[crypto.randomInt(a.length)];
 
 // Writes one claude.ai chat as a gateway Cowork session; returns its record.
-export function writeSession(store, conv, { sid = crypto.randomUUID(), space = null, template = sessionTemplate(store.base) } = {}) {
+// `folders`: more folders the task opens on (a Cowork task's own, from the
+// official Desktop), after the project's.
+export function writeSession(store, conv, { sid = crypto.randomUUID(), space = null, folders = [], template = sessionTemplate(store.base) } = {}) {
   const short = sid.slice(0, 8);
   const dir = path.join(store.base, short);
   const outputs = path.join(dir, 'outputs');
@@ -337,13 +450,14 @@ export function writeSession(store, conv, { sid = crypto.randomUUID(), space = n
   fs.writeFileSync(path.join(dir, 'audit.jsonl'), audit.join('\n') + '\n', { mode: 0o600 });
 
   const name = `${pick(WORDS)}-${pick(WORDS)}-${pick(NAMES)}`;
+  const opened = [...new Set([...(space ? [space.folder] : []), ...folders.filter((f) => fs.existsSync(f))])];
   const { titleSource, spaceId, spaceIdSetBy, ...rest } = template;
   const meta = {
     ...rest,
     sessionId: `local_${sid}`, processName: name, vmProcessName: name, cliSessionId: cli,
     cwd: store.base + path.sep, createdAt: ms(conv.created_at), lastActivityAt: ms(conv.updated_at),
     title: conv.name || 'Chat from claude.ai', initialMessage: chain.length ? messageText(chain[0]).slice(0, 2000) : '',
-    isArchived: false, userSelectedFolders: space ? [space.folder] : [], resolvedFolderKinds: space ? [{ display: space.folder, kind: 'local' }] : [],
+    isArchived: false, userSelectedFolders: opened, resolvedFolderKinds: opened.map((f) => ({ display: f, kind: 'local' })),
     ...(space && { spaceId: space.id, spaceIdSetBy: 'user' }),
   };
   writeJson(path.join(store.base, `local_${sid}.json`), meta);
