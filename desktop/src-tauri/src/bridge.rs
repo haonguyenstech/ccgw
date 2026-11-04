@@ -15,7 +15,7 @@ use axum::{body::Body, http::StatusCode, response::{IntoResponse, Response}, Jso
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::{collections::{HashMap, HashSet}, convert::Infallible, process::Stdio, sync::{Arc, Mutex}, time::{Duration, Instant}};
-use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, process::Command, sync::{mpsc, oneshot}};
+use tokio::{io::{AsyncBufReadExt, AsyncWriteExt, BufReader}, sync::{mpsc, oneshot}};
 
 const TOOL_PREFIX: &str = "mcp__desktop__";
 const TOOL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -516,7 +516,7 @@ impl Bridge {
         }
         if !allowed.is_empty() { args.extend(["--allowedTools".into(), allowed.join(",")]); }
         if debug() { eprintln!("[spawn] {:?}", args.iter().map(|a| a.chars().take(80).collect::<String>()).collect::<Vec<_>>()); }
-        let mut child = Command::new(gateway::claude_executable(&self.config.claude_path))
+        let mut child = crate::platform::tokio_command(gateway::claude_executable(&self.config.claude_path))
             .args(&args)
             .current_dir(gateway::workspace())
             .env("MCP_TOOL_TIMEOUT", TOOL_TIMEOUT.as_millis().to_string())

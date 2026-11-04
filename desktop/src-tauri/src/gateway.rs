@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::{collections::VecDeque, convert::Infallible, path::PathBuf, process::Stdio, sync::{Arc, Mutex}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use subtle::ConstantTimeEq;
-use tokio::{io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader}, process::Command, sync::{mpsc, oneshot}};
+use tokio::{io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader}, sync::{mpsc, oneshot}};
 
 /// Upper bound for one request; the CLI child is killed when it is exceeded.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
@@ -96,16 +96,7 @@ fn now_secs() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as
 
 pub fn claude_executable(path: &str) -> String {
     if !path.is_empty() { return path.into(); }
-    if let Some(home) = dirs::home_dir() {
-        for candidate in [".local/bin/claude", ".claude/local/claude"] {
-            let local = home.join(candidate);
-            if local.is_file() { return local.display().to_string(); }
-        }
-    }
-    for candidate in ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"] {
-        if std::path::Path::new(candidate).is_file() { return candidate.into(); }
-    }
-    "claude".into()
+    crate::platform::claude_candidates().into_iter().find(|p| p.is_file()).map(|p| p.display().to_string()).unwrap_or_else(|| "claude".into())
 }
 
 /// Returns the CLI version, cached for 30 s so the UI can poll cheaply.
@@ -115,7 +106,7 @@ pub fn claude_version(path: &str) -> Option<String> {
     if let Some((p, at, v)) = cache.as_ref() {
         if p == path && at.elapsed() < Duration::from_secs(30) { return v.clone(); }
     }
-    let version = std::process::Command::new(claude_executable(path)).arg("--version").stderr(Stdio::null()).output().ok()
+    let version = crate::platform::command(claude_executable(path)).arg("--version").stderr(Stdio::null()).output().ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     *cache = Some((path.into(), Instant::now(), version.clone()));
@@ -258,7 +249,7 @@ pub(crate) fn cli_model(body: &Value) -> String {
 enum Ev { Event(Value), Done(Value), Failed(String) }
 
 fn spawn_claude(config: &Config, model: &str, system: &str, prompt: String, activity: SharedActivity) -> Result<mpsc::Receiver<Ev>, String> {
-    let mut child = Command::new(claude_executable(&config.claude_path))
+    let mut child = crate::platform::tokio_command(claude_executable(&config.claude_path))
         .args(["--print", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
                "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence",
                "--model", model, "--system-prompt", system])

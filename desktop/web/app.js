@@ -595,5 +595,5 @@ document.addEventListener('click', async event => {
   }
 });
 
-render();
+invoke('initial_page').then(p => { if (p && views[p]) current = p; }).catch(() => {}).finally(render);
 setInterval(() => { if (!document.hidden) refreshStatus(); }, 3000);

@@ -1,7 +1,7 @@
-use crate::{settings, start_gateway_inner, stop_gateway_inner, restart_gateway_inner, rotate_key_inner, RuntimeState};
+use crate::{platform, settings, start_gateway_inner, stop_gateway_inner, restart_gateway_inner, rotate_key_inner, RuntimeState};
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::{path::PathBuf, process::Command, sync::{Arc, Mutex}, time::{Duration, Instant}};
+use std::{path::PathBuf, sync::{Arc, Mutex}, time::Duration};
 
 #[derive(Serialize)]
 pub struct ActionResult { pub ok: bool, pub command: String, pub output: String }
@@ -57,71 +57,42 @@ fn result(args: &[String], output: impl Into<String>) -> ActionResult {
 fn config(shared: &Arc<Mutex<RuntimeState>>) -> settings::Config { shared.lock().unwrap().config.clone() }
 fn url(shared: &Arc<Mutex<RuntimeState>>) -> String { let c = config(shared); format!("http://{}:{}", c.host, c.port) }
 fn run_cmd(program: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(program).args(args).output().map_err(|e| format!("{program}: {e}"))?;
+    let out = platform::command(program).args(args).output().map_err(|e| format!("{program}: {e}"))?;
     if !out.status.success() { return Err(format!("{program}: {}", String::from_utf8_lossy(&out.stderr).trim())); }
     Ok(String::from_utf8_lossy(&out.stdout).trim().into())
 }
-fn desktop_pids() -> Vec<(i32, bool)> {
-    if std::env::var_os("CCGW_DESKTOP_DIR").is_some() { return vec![]; }
-    if !cfg!(target_os = "macos") { return vec![]; }
-    let Ok(raw) = run_cmd("pgrep", &["-x", "Claude"]) else { return vec![] };
-    let pids: Vec<_> = raw.lines().filter_map(|s| s.parse::<i32>().ok()).collect();
-    let official = format!("--user-data-dir={}", official_dir().display());
-    pids.into_iter().map(|pid| {
-        let cmd = run_cmd("ps", &["-o", "command=", "-p", &pid.to_string()]).unwrap_or_default();
-        (pid, cmd.contains(&official))
-    }).collect()
-}
 pub fn desktop_status() -> DesktopStatus {
-    let pids = desktop_pids();
+    let procs = platform::desktop_procs();
     DesktopStatus {
-        gateway_running: pids.iter().any(|(_, official)| !official),
-        official_running: pids.iter().any(|(_, official)| *official),
+        gateway_running: procs.iter().any(|p| !p.official),
+        official_running: procs.iter().any(|p| p.official),
     }
 }
-fn official_dir() -> PathBuf {
-    if let Ok(base) = std::env::var("CCGW_DESKTOP_DIR") { return PathBuf::from(base).join("official/Claude-Official"); }
-    dirs::home_dir().unwrap_or_default().join("Library/Application Support/Claude-Official")
-}
-fn wait_for(desired: bool, official: bool) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        if desktop_pids().iter().any(|(_, o)| *o == official) == desired { return true; }
-        if Instant::now() >= deadline { return false; }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-}
+fn official_dir() -> PathBuf { platform::official_dir() }
 pub(crate) fn quit_desktop(official: bool) -> Result<bool, String> {
-    if !cfg!(target_os = "macos") { return Err("Điều khiển Claude Desktop hiện hỗ trợ macOS.".into()); }
-    let pids: Vec<_> = desktop_pids().into_iter().filter(|(_, o)| *o == official).map(|(p, _)| p).collect();
-    if pids.is_empty() { return Ok(false); }
-    if !official && !desktop_pids().iter().any(|(_, o)| *o) {
-        let _ = run_cmd("osascript", &["-e", "quit app \"Claude\""]);
-    } else {
-        for pid in &pids { let _ = run_cmd("kill", &["-TERM", &pid.to_string()]); }
-    }
-    if !wait_for(false, official) { return Err("Claude Desktop chưa đóng xong; hãy thử lại.".into()); }
-    Ok(true)
+    if platform::fake_desktop().is_some() { return Ok(false); }
+    platform::quit(official)
 }
 pub(crate) fn open_desktop(official: bool) -> Result<(), String> {
-    if !cfg!(target_os = "macos") { return Err("Điều khiển Claude Desktop hiện hỗ trợ macOS.".into()); }
-    if let Some((pid, _)) = desktop_pids().into_iter().find(|(_, o)| *o == official) {
-        let script = format!("ObjC.import('AppKit'); var a = $.NSRunningApplication.runningApplicationWithProcessIdentifier({pid}); a.isNil() ? false : a.activateWithOptions($.NSApplicationActivateAllWindows)");
-        let _ = run_cmd("osascript", &["-l", "JavaScript", "-e", &script]);
-        return Ok(());
-    }
-    if official {
+    if platform::fake_desktop().is_some() { return Ok(()); }
+    if let Some(pid) = platform::running(official).first() { platform::activate(*pid); return Ok(()); }
+    if official && !platform::IS_WIN {
+        // macOS: the second instance reads its mode from "<data dir>-3p".
         let dir = official_dir();
         let mode_file = PathBuf::from(format!("{}-3p", dir.display())).join("claude_desktop_config.json");
         let mut conf = settings::read_json(&mode_file);
         conf["deploymentMode"] = json!("1p");
         settings::atomic_json(&mode_file, &conf)?;
-        run_cmd("open", &["-n", "-a", "Claude", "--args", &format!("--user-data-dir={}", dir.display())])?;
-    } else {
-        let args: &[&str] = if desktop_pids().iter().any(|(_, o)| *o) { &["-n", "-a", "Claude"] } else { &["-a", "Claude"] };
-        run_cmd("open", args)?;
     }
-    if !wait_for(true, official) { return Err("Claude Desktop không khởi động được.".into()); }
+    // Windows: both instances read the mode from Claude-3p, and only at startup,
+    // so it says "1p" just while the official one starts.
+    let flip = official && platform::IS_WIN && settings::desktop_mode() == "gateway";
+    if flip { settings::set_desktop_mode("claude.ai")?; }
+    let launched = platform::launch(official);
+    let up = launched.is_ok() && platform::wait_for(true, official, if platform::IS_WIN { 40 } else { 15 });
+    if flip { settings::set_desktop_mode("gateway")?; }
+    launched?;
+    if !up { return Err("Claude Desktop không khởi động được.".into()); }
     Ok(())
 }
 fn switch_mode(mode: &str, shared: &Arc<Mutex<RuntimeState>>) -> Result<(), String> {
@@ -190,28 +161,10 @@ pub(crate) fn split_command(line: &str) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Finds a program the way a login shell would: Desktop starts MCP servers with an empty PATH.
-fn resolve_program(program: &str) -> Option<String> {
-    if program.contains('/') { return std::path::Path::new(program).is_file().then(|| program.to_string()); }
-    let home = dirs::home_dir().unwrap_or_default();
-    let dirs = ["/opt/homebrew/bin".into(), "/usr/local/bin".into(), home.join(".local/bin").display().to_string(), home.join(".bun/bin").display().to_string(), home.join(".cargo/bin").display().to_string(), "/usr/bin".into(), "/bin".into()];
-    if let Some(p) = dirs.iter().map(|d| format!("{d}/{program}")).find(|p| std::path::Path::new(p).is_file()) { return Some(p); }
-    let out = Command::new("/bin/zsh").args(["-lc", &format!("command -v {program}")]).output().ok()?;
-    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    (out.status.success() && p.starts_with('/')).then_some(p)
-}
-
-fn with_path(mut entry: Value, program: &str) -> Value {
-    let dir = std::path::Path::new(program).parent().map(|d| d.display().to_string()).unwrap_or_default();
-    entry["env"] = json!({"PATH": format!("{dir}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")});
-    entry
-}
-
 fn local_entry(name: &str, line: &str) -> Result<Value, String> {
     let mut parts = split_command(line)?;
-    let program = resolve_program(&parts[0]).ok_or_else(|| format!("Không tìm thấy chương trình \"{}\". Nhập đường dẫn đầy đủ.", parts[0]))?;
-    parts.remove(0);
-    Ok(with_path(json!({"name": name, "command": program, "args": parts}), &program))
+    let program = parts.remove(0);
+    platform::mcp_command(name, &program, parts)
 }
 
 fn preset_url(name: &str) -> Option<&'static str> {
@@ -255,8 +208,8 @@ async fn connector_action(args: &[String], shared: &Arc<Mutex<RuntimeState>>) ->
                 if official {
                     // The claude.ai Desktop only runs local servers from its config: bridge the URL with mcp-remote.
                     if name == "figma" && flag(args, "--url").is_none() { return Err("Figma chỉ cho client trong danh sách của Figma; với cửa sổ Official hãy thêm Figma trong Settings → Connectors.".into()); }
-                    let npx = resolve_program("npx").ok_or("Cần Node.js (npx) để nối MCP qua mạng cho cửa sổ Official. Cài Node.js rồi thử lại.")?;
-                    with_path(json!({"name": name, "command": npx, "args": ["-y", "mcp-remote@latest", url]}), &npx)
+                    platform::mcp_command(&name, "npx", vec!["-y".into(), "mcp-remote@latest".into(), url.clone()])
+                        .map_err(|e| format!("Cần Node.js (npx) để nối MCP qua mạng cho cửa sổ Official. {e}"))?
                 } else {
                     let mut e = json!({"name": name, "transport": "http", "url": url, "oauth": true});
                     if name == "figma" && flag(args, "--url").is_none() {
@@ -418,16 +371,18 @@ mod tests {
         assert_eq!(split_command("node \"/a b/server.js\" --flag 'x y'").unwrap(), ["node", "/a b/server.js", "--flag", "x y"]);
         assert!(split_command("node 'oops").is_err());
         // Official: a preset goes through mcp-remote, a command stays local; no toolPolicy there.
-        if resolve_program("npx").is_some() {
+        if platform::resolve_program("npx").is_some() {
             connector_action(&["connector".into(), "add".into(), "linear".into(), "--official".into()], &shared).await.unwrap();
             let off = connectors(&shared, true).unwrap();
             let linear = off.iter().find(|c| c["name"] == "linear").unwrap();
-            assert!(linear["command"].as_str().unwrap().ends_with("/npx") && linear["args"][2] == "https://mcp.linear.app/mcp" && linear.get("transport").is_none());
+            let args = linear["args"].as_array().unwrap();
+            assert!(args.iter().any(|a| a == "mcp-remote@latest") && args.last().unwrap() == "https://mcp.linear.app/mcp" && linear.get("transport").is_none());
             assert_eq!(list_mcp(&shared).unwrap().iter().find(|i| i.name == "linear").unwrap().kind, "bridge");
         }
-        connector_action(&["connector".into(), "add".into(), "mine".into(), "--command".into(), "/bin/echo hello".into()], &shared).await.unwrap();
+        let echo = if platform::IS_WIN { "C:\\Windows\\System32\\whoami.exe hello" } else { "/bin/echo hello" };
+        connector_action(&["connector".into(), "add".into(), "mine".into(), "--command".into(), echo.into()], &shared).await.unwrap();
         let mine = connectors(&shared, false).unwrap().into_iter().find(|c| c["name"] == "mine").unwrap();
-        assert_eq!((mine["transport"].as_str(), mine["command"].as_str(), mine["args"][0].as_str()), (Some("stdio"), Some("/bin/echo"), Some("hello")));
+        assert_eq!((mine["transport"].as_str(), mine["args"][0].as_str()), (Some("stdio"), Some("hello")));
         connector_action(&["connector".into(), "add".into(), "custom".into(), "--url".into(), "https://example.com/mcp".into()], &shared).await.unwrap();
         assert!(connector_action(&["connector".into(), "add".into(), "bad".into(), "--url".into(), "http://x".into()], &shared).await.is_err());
         connector_action(&["connector".into(), "remove".into(), "mine".into()], &shared).await.unwrap();
