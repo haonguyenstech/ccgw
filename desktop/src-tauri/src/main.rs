@@ -306,6 +306,17 @@ struct StartPage(String);
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(i) = args.iter().position(|a| a == "--selftest") { selftest(args.get(i + 1).map(String::as_str).unwrap_or("ccgw-selftest.json")); return; }
+    // `--action <file> <words…>`: runs one app action (the buttons' code path) and writes the result.
+    if let Some(i) = args.iter().position(|a| a == "--action") {
+        let out = args.get(i + 1).cloned().unwrap_or_else(|| "ccgw-action.txt".into());
+        let words: Vec<String> = args[i + 2..].to_vec();
+        let config = settings::load().expect("config");
+        let shared = Arc::new(Mutex::new(RuntimeState { config, shutdown: None, running: false, last_error: None, generation: 0, activity: Default::default(), started_at: None }));
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let text = match rt.block_on(native::run(words, &shared)) { Ok(r) => format!("ok\n{}", r.output), Err(e) => format!("error\n{e}") };
+        let _ = std::fs::write(&out, text);
+        return;
+    }
     let start_page = args.iter().position(|a| a == "--page").and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
     let _ = settings::migrate_profile_label();
     let config = settings::load().expect("Cannot load CCGW Desktop configuration");
