@@ -224,7 +224,16 @@ fn mcp_tools(client: &[Value]) -> (Vec<Value>, HashMap<String, String>) {
     (tools, alias)
 }
 
+/// Claude Code is not signed in (or its session ran out): a 400 with a plain
+/// instruction. Not 401, which Desktop turns into a generic "run /login".
+pub fn login_hint(msg: &str) -> Option<String> {
+    let m = msg.to_lowercase();
+    (m.contains("failed to authenticate") || m.contains("not logged in") || m.contains("oauth session") || m.contains("please run /login") || m.contains("invalid api key"))
+        .then(|| format!("Claude Code trên máy chạy gateway chưa đăng nhập hoặc phiên đã hết hạn. Mở terminal, chạy `claude` để đăng nhập rồi gửi lại. ({})", msg.trim()))
+}
+
 fn classify_error(msg: &str) -> (StatusCode, &'static str) {
+    if login_hint(msg).is_some() { return (StatusCode::BAD_REQUEST, "invalid_request_error"); }
     let m = msg.to_lowercase();
     if m.contains("rate limit") || m.contains("rate_limit") || m.contains("usage limit") || m.contains("429") { (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error") }
     else if m.contains("overloaded") || m.contains("529") { (StatusCode::from_u16(529).unwrap(), "overloaded_error") }
@@ -334,7 +343,8 @@ fn fail(sink: &mut Sink, msg: &str) {
     if sink.done { return; }
     sink.done = true;
     let (status, kind) = classify_error(msg);
-    let body = json!({"type": "error", "error": {"type": kind, "message": msg}});
+    let text = login_hint(msg).unwrap_or_else(|| msg.to_string());
+    let body = json!({"type": "error", "error": {"type": kind, "message": text}});
     if sink.stream && sink.started { let _ = sink.out.send(Out::Sse(format!("event: error\ndata: {body}\n\n"))); }
     else { let _ = sink.out.send(Out::Json(status, body)); }
     sink.tracker.finish(status.as_u16(), Some(msg.to_string()));
@@ -810,6 +820,12 @@ mod tests {
         fail(&mut s, "You have hit your usage limit");
         let Some(Out::Json(status, _)) = rx.try_recv().ok() else { panic!() };
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut s = sink(tx, false);
+        fail(&mut s, "Failed to authenticate: OAuth session expired and could not be refreshed");
+        let Some(Out::Json(status, body)) = rx.try_recv().ok() else { panic!() };
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body["error"]["message"].as_str().unwrap().contains("chạy `claude` để đăng nhập"));
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         let mut inner = inner_with(sink(tx, true));

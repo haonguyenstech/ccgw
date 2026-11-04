@@ -44,7 +44,7 @@ pub fn fake_desktop() -> Option<PathBuf> { std::env::var_os("CCGW_DESKTOP_DIR").
 /// Where Claude Code usually lives, in order of preference.
 pub fn claude_candidates() -> Vec<PathBuf> {
     if IS_WIN {
-        let mut out = vec![home().join(".local/bin/claude.exe")];
+        let mut out = vec![home().join(".local").join("bin").join("claude.exe")];
         if let Ok(hits) = run("where.exe", &["claude"]) { out.extend(hits.lines().map(|l| PathBuf::from(l.trim())).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("exe")))); }
         out
     } else {
@@ -75,7 +75,7 @@ pub fn mcp_command(name: &str, program: &str, args: Vec<String>) -> Result<Value
         let lower = program.to_lowercase();
         if lower == "npx" || lower.ends_with("\\npx.cmd") || lower.ends_with("\\npx") {
             let node = resolve_program("node").ok_or("Cần Node.js (node.exe) để chạy npx. Cài Node.js rồi thử lại.")?;
-            let cli = Path::new(&node).parent().unwrap_or(Path::new("")).join("node_modules/npm/bin/npx-cli.js");
+            let cli = Path::new(&node).parent().unwrap_or(Path::new("")).join("node_modules").join("npm").join("bin").join("npx-cli.js");
             if !cli.exists() { return Err(format!("Không tìm thấy {}", cli.display())); }
             let mut a = vec![cli.display().to_string()];
             a.extend(args);
@@ -116,12 +116,12 @@ pub fn official_dir_candidates() -> Vec<PathBuf> {
         dirs.extend(r.filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().to_lowercase().starts_with("claude_")).map(|e| e.path()));
     }
     if let Ok(r) = std::fs::read_dir(local_app_data().join("Packages")) {
-        if let Some(fam) = r.filter_map(Result::ok).find(|e| e.file_name().to_string_lossy().starts_with("Claude_")) { dirs.push(fam.path().join("LocalCache/Roaming/Claude")); }
+        if let Some(fam) = r.filter_map(Result::ok).find(|e| e.file_name().to_string_lossy().starts_with("Claude_")) { dirs.push(fam.path().join("LocalCache").join("Roaming").join("Claude")); }
     }
     dirs.push(app_data().join("Claude"));
     let mut dirs: Vec<PathBuf> = dirs.into_iter().filter(|d| d.exists()).collect();
     dirs.dedup();
-    dirs.sort_by_key(|d| std::cmp::Reverse((mtime(&d.join("Network/Cookies")).max(mtime(&d.join("Cookies"))), mtime(&d.join("config.json")).max(mtime(&d.join("Local State"))))));
+    dirs.sort_by_key(|d| std::cmp::Reverse((mtime(&d.join("Network").join("Cookies")).max(mtime(&d.join("Cookies"))), mtime(&d.join("config.json")).max(mtime(&d.join("Local State"))))));
     dirs
 }
 
@@ -191,7 +191,7 @@ pub fn quit(official: bool) -> Result<bool, String> {
 /// from `deploymentMode` at startup, which the caller sets.
 pub fn launch(official: bool) -> Result<(), String> {
     if IS_WIN {
-        let squirrel = local_app_data().join("AnthropicClaude/claude.exe");
+        let squirrel = local_app_data().join("AnthropicClaude").join("claude.exe");
         if squirrel.exists() { command(&squirrel).spawn().map_err(|e| e.to_string())?; return Ok(()); }
         powershell("$a = Get-StartApps | Where-Object { $_.Name -eq 'Claude' } | Select-Object -First 1; if ($a) { Start-Process ('shell:AppsFolder\\' + $a.AppID) } else { throw 'Claude Desktop is not installed' }")
             .map_err(|_| "Chưa cài Claude Desktop.".to_string())?;
