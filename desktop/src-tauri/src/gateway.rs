@@ -4,7 +4,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::{collections::VecDeque, convert::Infallible, path::PathBuf, process::Stdio, sync::{Arc, Mutex}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 use subtle::ConstantTimeEq;
-use tokio::{io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader}, process::Command, sync::{mpsc, oneshot}};
+use tokio::{io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader}, sync::{mpsc, oneshot}};
 
 /// Upper bound for one request; the CLI child is killed when it is exceeded.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
@@ -96,16 +96,7 @@ fn now_secs() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as
 
 pub fn claude_executable(path: &str) -> String {
     if !path.is_empty() { return path.into(); }
-    if let Some(home) = dirs::home_dir() {
-        for candidate in [".local/bin/claude", ".claude/local/claude"] {
-            let local = home.join(candidate);
-            if local.is_file() { return local.display().to_string(); }
-        }
-    }
-    for candidate in ["/opt/homebrew/bin/claude", "/usr/local/bin/claude"] {
-        if std::path::Path::new(candidate).is_file() { return candidate.into(); }
-    }
-    "claude".into()
+    crate::platform::claude_candidates().into_iter().find(|p| p.is_file()).map(|p| p.display().to_string()).unwrap_or_else(|| "claude".into())
 }
 
 /// Returns the CLI version, cached for 30 s so the UI can poll cheaply.
@@ -115,7 +106,7 @@ pub fn claude_version(path: &str) -> Option<String> {
     if let Some((p, at, v)) = cache.as_ref() {
         if p == path && at.elapsed() < Duration::from_secs(30) { return v.clone(); }
     }
-    let version = std::process::Command::new(claude_executable(path)).arg("--version").stderr(Stdio::null()).output().ok()
+    let version = crate::platform::command(claude_executable(path)).arg("--version").stderr(Stdio::null()).output().ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     *cache = Some((path.into(), Instant::now(), version.clone()));
@@ -258,7 +249,7 @@ pub(crate) fn cli_model(body: &Value) -> String {
 enum Ev { Event(Value), Done(Value), Failed(String) }
 
 fn spawn_claude(config: &Config, model: &str, system: &str, prompt: String, activity: SharedActivity) -> Result<mpsc::Receiver<Ev>, String> {
-    let mut child = Command::new(claude_executable(&config.claude_path))
+    let mut child = crate::platform::tokio_command(claude_executable(&config.claude_path))
         .args(["--print", "--output-format", "stream-json", "--verbose", "--include-partial-messages",
                "--tools", "", "--strict-mcp-config", "--setting-sources", "", "--no-session-persistence",
                "--model", model, "--system-prompt", system])
@@ -298,6 +289,11 @@ fn spawn_claude(config: &Config, model: &str, system: &str, prompt: String, acti
         let _ = tx.send(Ev::Failed(msg)).await;
     });
     Ok(rx)
+}
+
+/// A CLI failure as an HTTP error, with a sign-in hint when that is the cause.
+fn cli_error(err: &str) -> (StatusCode, String) {
+    match crate::bridge::login_hint(err) { Some(h) => (StatusCode::BAD_REQUEST, h), None => (StatusCode::BAD_GATEWAY, err.to_string()) }
 }
 
 fn result_error(result: &Value) -> Option<String> {
@@ -349,14 +345,14 @@ async fn messages(State(state): State<GatewayState>, headers: HeaderMap, Json(bo
                     if e["type"] == "message_delta" { tracker.usage(&e["usage"]); if !e["delta"]["stop_reason"].is_null() { stop_reason = e["delta"]["stop_reason"].clone(); } }
                 },
                 Ev::Done(result) => {
-                    if let Some(err) = result_error(&result) { tracker.finish(502, Some(err.clone())); return error(StatusCode::BAD_GATEWAY, "api_error", &err); }
+                    if let Some(err) = result_error(&result) { tracker.finish(502, Some(err.clone())); return { let (st, m) = cli_error(&err); error(st, if st == StatusCode::BAD_REQUEST { "invalid_request_error" } else { "api_error" }, &m) }; }
                     tracker.usage(&result["usage"]);
                     if text.is_empty() { text = result["result"].as_str().unwrap_or("").into(); }
                     let usage = json!({"input_tokens": tracker.input, "output_tokens": tracker.output});
                     tracker.finish(200, None);
                     return Json(json!({"id": id, "type": "message", "role": "assistant", "model": model, "content": [{"type": "text", "text": text}], "stop_reason": stop_reason, "stop_sequence": null, "usage": usage})).into_response();
                 },
-                Ev::Failed(err) => { tracker.finish(502, Some(err.clone())); return error(StatusCode::BAD_GATEWAY, "api_error", &err); },
+                Ev::Failed(err) => { tracker.finish(502, Some(err.clone())); return { let (st, m) = cli_error(&err); error(st, if st == StatusCode::BAD_REQUEST { "invalid_request_error" } else { "api_error" }, &m) }; },
             }
         }
         tracker.finish(502, Some("Claude Code không trả kết quả".into()));
@@ -367,13 +363,13 @@ async fn messages(State(state): State<GatewayState>, headers: HeaderMap, Json(bo
     let first = match rx.recv().await {
         Some(Ev::Event(e)) => e,
         Some(Ev::Done(result)) => {
-            if let Some(err) = result_error(&result) { tracker.finish(502, Some(err.clone())); return error(StatusCode::BAD_GATEWAY, "api_error", &err); }
+            if let Some(err) = result_error(&result) { tracker.finish(502, Some(err.clone())); return { let (st, m) = cli_error(&err); error(st, if st == StatusCode::BAD_REQUEST { "invalid_request_error" } else { "api_error" }, &m) }; }
             tracker.usage(&result["usage"]);
             let usage = json!({"input_tokens": tracker.input, "output_tokens": tracker.output});
             tracker.finish(200, None);
             return ([("content-type", "text/event-stream"), ("cache-control", "no-cache")], synthetic_events(&id, &model, result["result"].as_str().unwrap_or(""), &usage)).into_response();
         },
-        Some(Ev::Failed(err)) => { tracker.finish(502, Some(err.clone())); return error(StatusCode::BAD_GATEWAY, "api_error", &err); },
+        Some(Ev::Failed(err)) => { tracker.finish(502, Some(err.clone())); return { let (st, m) = cli_error(&err); error(st, if st == StatusCode::BAD_REQUEST { "invalid_request_error" } else { "api_error" }, &m) }; },
         None => { tracker.finish(502, Some("Claude Code không trả kết quả".into())); return error(StatusCode::BAD_GATEWAY, "api_error", "Claude Code không trả kết quả"); },
     };
     let (out_tx, out_rx) = mpsc::channel::<String>(256);

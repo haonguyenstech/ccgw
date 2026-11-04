@@ -4,6 +4,7 @@ mod bridge;
 mod gateway;
 mod settings;
 mod native;
+mod platform;
 mod skills;
 mod sync;
 mod syncflow;
@@ -46,6 +47,8 @@ struct Status {
     started_at: Option<u64>,
     last_error: Option<String>,
     version: &'static str,
+    os: &'static str,
+    official_dir: String,
     activity: gateway::ActivitySnapshot,
 }
 
@@ -75,6 +78,8 @@ async fn status(state: tauri::State<'_, AppState>) -> Result<Status, String> {
             started_at,
             last_error,
             version: env!("CARGO_PKG_VERSION"),
+            os: std::env::consts::OS,
+            official_dir: platform::official_dir().display().to_string(),
             activity,
         })
     }).await
@@ -265,22 +270,69 @@ async fn install_official_skill(path: String, overwrite: bool) -> Result<String,
 #[tauri::command]
 async fn add_read_sync() -> Result<String, String> { blocking(|| tauri::async_runtime::block_on(syncflow::add_read_sync())).await }
 #[tauri::command]
-async fn copy_text(text: String) -> Result<(), String> {
-    blocking(move || {
-        use std::io::Write;
-        let mut child = std::process::Command::new("/usr/bin/pbcopy").stdin(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
-        child.stdin.take().unwrap().write_all(text.as_bytes()).map_err(|e| e.to_string())?;
-        child.wait().map_err(|e| e.to_string())?;
-        Ok(())
-    }).await
-}
+async fn copy_text(text: String) -> Result<(), String> { blocking(move || platform::copy_text(&text)).await }
 #[tauri::command]
 async fn open_url(url: String) -> Result<(), String> {
     if !url.starts_with("https://claude.ai/") { return Err("Chỉ mở link claude.ai".into()); }
-    blocking(move || { std::process::Command::new("/usr/bin/open").arg(&url).status().map_err(|e| e.to_string())?; Ok(()) }).await
+    blocking(move || platform::open_url(&url)).await
 }
 
+/// `--selftest <file>`: what the app sees on this machine, as JSON (no secrets).
+fn selftest(out: &str) {
+    let config = settings::load().ok();
+    let claude_path = config.as_ref().map(|c| c.claude_path.clone()).unwrap_or_default();
+    let shared = Arc::new(Mutex::new(RuntimeState { config: config.clone().unwrap(), shutdown: None, running: false, last_error: None, generation: 0, activity: Default::default(), started_at: None }));
+    let official = platform::official_dir_candidates();
+    let cookie = official.iter().filter(|_| platform::IS_WIN).map(|d| (d.display().to_string(), match sync::official_cookies(d) {
+        Ok(j) => format!("ok (org {})", j.last_active_org.unwrap_or_default()),
+        Err(sync::CookieError::Busy) => "busy (official window holds the file)".into(),
+        Err(sync::CookieError::Other(e)) => format!("error: {e}"),
+    })).collect::<Vec<_>>();
+    let report = serde_json::json!({
+        "os": std::env::consts::OS, "version": env!("CARGO_PKG_VERSION"),
+        "config_file": settings::config_path().display().to_string(),
+        "claude": gateway::claude_executable(&claude_path), "claude_version": gateway::claude_version(&claude_path),
+        "desktop3p": platform::desktop3p_dir().display().to_string(), "desktop_mode": settings::desktop_mode(),
+        "official_dirs": official.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
+        "official_cookies": cookie,
+        "desktop_procs": platform::desktop_procs().iter().map(|p| serde_json::json!({"pid": p.pid, "official": p.official})).collect::<Vec<_>>(),
+        "mcp": native::list_mcp(&shared).map(|l| l.iter().map(|m| format!("{} [{}{}] {}", m.name, if m.official { "official " } else { "gateway " }, m.kind, m.endpoint)).collect::<Vec<_>>()).unwrap_or_else(|e| vec![e]),
+        "gateway_skills": skills::list_gateway().len(),
+        "npx": platform::resolve_program("npx"), "node": platform::resolve_program("node"),
+    });
+    let _ = std::fs::write(out, serde_json::to_string_pretty(&report).unwrap());
+}
+
+#[tauri::command]
+fn initial_page(state: tauri::State<'_, StartPage>) -> String { state.0.clone() }
+struct StartPage(String);
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(i) = args.iter().position(|a| a == "--selftest") { selftest(args.get(i + 1).map(String::as_str).unwrap_or("ccgw-selftest.json")); return; }
+    // `--action <file> <words…>`: runs one app action (the buttons' code path) and writes the result.
+    if let Some(i) = args.iter().position(|a| a == "--action") {
+        let out = args.get(i + 1).cloned().unwrap_or_else(|| "ccgw-action.txt".into());
+        let words: Vec<String> = args[i + 2..].to_vec();
+        let config = settings::load().expect("config");
+        let shared = Arc::new(Mutex::new(RuntimeState { config, shutdown: None, running: false, last_error: None, generation: 0, activity: Default::default(), started_at: None }));
+        let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        // Read-only claude.ai checks for the sync code path.
+        let text = match words.first().map(String::as_str) {
+            Some("skills-official") => match rt.block_on(syncflow::official_skill_list()) {
+                Ok((list, notice)) => format!("ok\n{} skills: {}{}", list.len(), list.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "), notice.map(|n| format!("\n{n}")).unwrap_or_default()),
+                Err(e) => format!("error\n{e}"),
+            },
+            Some("sync-plan") => match rt.block_on(syncflow::sync_plan()) {
+                Ok(p) => format!("ok\n{}\nskills: {} ({} new)", p.groups.iter().map(|g| format!("{}: {} chat, {} task, {} new", g.name, g.chats, g.tasks, g.fresh)).collect::<Vec<_>>().join("\n"), p.skills.len(), p.new_skills),
+                Err(e) => format!("error\n{e}"),
+            },
+            _ => match rt.block_on(native::run(words, &shared)) { Ok(r) => format!("ok\n{}", r.output), Err(e) => format!("error\n{e}") },
+        };
+        let _ = std::fs::write(&out, text);
+        return;
+    }
+    let start_page = args.iter().position(|a| a == "--page").and_then(|i| args.get(i + 1)).cloned().unwrap_or_default();
     let _ = settings::migrate_profile_label();
     let config = settings::load().expect("Cannot load CCGW Desktop configuration");
     if std::env::args().any(|arg| arg == "--headless") {
@@ -303,7 +355,8 @@ fn main() {
     }
     tauri::Builder::default()
         .manage(AppState(shared))
-        .invoke_handler(tauri::generate_handler![status, desktop_status, start_gateway, stop_gateway, rotate_key, save_settings, apply_desktop_profile, run_action, list_mcp, choose_skill_folder, inspect_skill, install_gateway_skill, list_gateway_skills, prepare_official_skill, sync_state, sync_plan, sync_run, handoff_plan, handoff_run, add_read_sync, list_official_skills, install_official_skill, copy_text, open_url])
+        .manage(StartPage(start_page))
+        .invoke_handler(tauri::generate_handler![initial_page, status, desktop_status, start_gateway, stop_gateway, rotate_key, save_settings, apply_desktop_profile, run_action, list_mcp, choose_skill_folder, inspect_skill, install_gateway_skill, list_gateway_skills, prepare_official_skill, sync_state, sync_plan, sync_run, handoff_plan, handoff_run, add_read_sync, list_official_skills, install_official_skill, copy_text, open_url])
         .run(tauri::generate_context!())
         .expect("error while running CCGW Desktop");
 }

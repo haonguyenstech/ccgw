@@ -70,7 +70,7 @@ async fn account_skills(api: &ClaudeAi, store: &Store) -> Vec<Value> {
 }
 
 pub async fn sync_plan() -> R<SyncPlan> {
-    let api = ClaudeAi::official()?;
+    let api = ClaudeAi::official().await?;
     let store = gateway_store(&desktop3p())?;
     let remote = fetch_remote(&api).await?;
     let state = load_state();
@@ -94,7 +94,7 @@ pub struct SyncReport { pub added: usize, pub updated: usize, pub kept: usize, p
 
 pub async fn sync_run(picked: Vec<String>) -> R<SyncReport> {
     if picked.is_empty() { return Err("Chọn ít nhất một mục để sync.".into()); }
-    let api = ClaudeAi::official()?;
+    let api = ClaudeAi::official().await?;
     let store = gateway_store(&desktop3p())?;
     let remote = fetch_remote(&api).await?;
     let mut state = load_state();
@@ -268,7 +268,7 @@ pub struct HandoffPlan { pub items: Vec<HandoffEntry>, pub skills: Vec<String>, 
 
 pub async fn handoff_plan() -> R<HandoffPlan> {
     let store = gateway_store(&desktop3p())?;
-    let api = ClaudeAi::official()?;
+    let api = ClaudeAi::official().await?;
     let (projects, convs) = tokio::join!(api.projects(), api.conversations());
     let (projects, convs) = (projects?, convs?);
     let convs: HashMap<String, Value> = convs.into_iter().filter_map(|c| Some((c["uuid"].as_str()?.to_string(), c))).collect();
@@ -289,7 +289,7 @@ async fn write_brief(system: &str, user: &str, model: &str) -> R<String> {
     let dir = settings::config_path().with_file_name("handoff");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let claude = std::env::var("CCGW_HANDOFF_CLAUDE").unwrap_or_else(|_| gateway::claude_executable(&settings::load().map(|c| c.claude_path).unwrap_or_default()));
-    let mut child = tokio::process::Command::new(claude)
+    let mut child = crate::platform::tokio_command(claude)
         .args(["-p", "--model", model, "--output-format", "text", "--system-prompt", system, "--tools=", "--setting-sources=", "--strict-mcp-config", "--no-session-persistence"])
         .env_remove("CLAUDECODE").current_dir(&dir)
         .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
@@ -317,7 +317,7 @@ pub async fn handoff_run(sessions: Vec<String>, skills: bool, model: String, bri
     if sessions.is_empty() && !skills { return Err("Chọn ít nhất một chat hoặc skills để hand off.".into()); }
     let model = if model.trim().is_empty() { "sonnet".to_string() } else { model };
     let store = gateway_store(&desktop3p())?;
-    let api = ClaudeAi::official()?;
+    let api = ClaudeAi::official().await?;
     let (projects, convs) = tokio::join!(api.projects(), api.conversations());
     let (mut projects, convs) = (projects?, convs?);
     let convs: HashMap<String, Value> = convs.into_iter().filter_map(|c| Some((c["uuid"].as_str()?.to_string(), c))).collect();
@@ -415,7 +415,7 @@ pub struct AccountSkill { pub name: String, pub description: String, pub source:
 
 /// The account's skills; the official Desktop's local copy when claude.ai cannot be read.
 pub async fn official_skill_list() -> R<(Vec<AccountSkill>, Option<String>)> {
-    let remote = match ClaudeAi::official() { Ok(api) => api.skills().await.map_err(|e| e.message), Err(e) => Err(e) };
+    let remote = match ClaudeAi::official().await { Ok(api) => api.skills().await.map_err(|e| e.message), Err(e) => Err(e) };
     match remote {
         Ok(list) => {
             let mut out: Vec<AccountSkill> = list.into_iter().filter_map(|s| Some(AccountSkill {
@@ -442,7 +442,7 @@ pub async fn official_skill_list() -> R<(Vec<AccountSkill>, Option<String>)> {
 pub async fn install_official_skill(path: String, overwrite: bool) -> R<String> {
     let info = crate::skills::inspect_folder(path.clone())?;
     let zip = zip_skill(Path::new(&path), &info.name)?;
-    let api = ClaudeAi::official()?;
+    let api = ClaudeAi::official().await?;
     match api.upload_skill(&info.name, zip, overwrite).await.map_err(String::from)? {
         "exists" => Ok("exists".into()),
         _ => Ok(format!("Đã cài {} lên tài khoản claude.ai. Cửa sổ Official nhận skill sau khi tải lại (mở lại cửa sổ nếu chưa thấy).", info.name)),
@@ -453,7 +453,7 @@ pub async fn install_official_skill(path: String, overwrite: bool) -> R<String> 
 
 /// Uploads the bundled read-sync skill to the claude.ai account (replacing an older copy).
 pub async fn add_read_sync() -> R<String> {
-    let api = ClaudeAi::official()?;
+    let api = ClaudeAi::official().await?;
     let dir = std::env::temp_dir().join(format!("ccgw-read-sync-{}", uuid::Uuid::new_v4().simple())).join("read-sync");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     fs::write(dir.join("SKILL.md"), READ_SYNC_SKILL).map_err(|e| e.to_string())?;
@@ -540,13 +540,23 @@ mod tests {
         // The official Desktop's cookie jar, sealed like Electron does.
         let official = desk.join("official/Claude-Official/Network");
         fs::create_dir_all(&official).unwrap();
-        let seal = |s: &str| { let mut p = vec![7u8; 32]; p.extend(s.as_bytes()); hex::encode(encrypt(&p).unwrap()) };
-        let sql = format!("create table cookies(host_key text, name text, encrypted_value blob); insert into cookies values('.claude.ai','sessionKey',X'{}'),('.claude.ai','lastActiveOrg',X'{}');", seal("sk-ant-sid-test"), seal("org1"));
-        assert!(std::process::Command::new("/usr/bin/sqlite3").arg(official.join("Cookies")).arg(sql).status().unwrap().success());
+        let seal = |s: &str| { let mut p = vec![7u8; 32]; p.extend(s.as_bytes()); encrypt(&p, &official).unwrap() };
+        let db = rusqlite::Connection::open(official.join("Cookies")).unwrap();
+        db.execute_batch("create table cookies(host_key text, name text, encrypted_value blob);").unwrap();
+        for (n, v) in [("sessionKey", "sk-ant-sid-test"), ("lastActiveOrg", "org1")] { db.execute("insert into cookies values('.claude.ai', ?1, ?2)", rusqlite::params![n, seal(v)]).unwrap(); }
+        drop(db);
         // A fake `claude` for the handoff note.
-        let fake = root.join("claude.sh");
-        fs::write(&fake, "#!/bin/sh\ncat > /dev/null\nprintf '### Mục tiêu\\nĐi Đà Lạt 4 ngày\\n'\n").unwrap();
-        { use std::os::unix::fs::PermissionsExt; fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap(); }
+        #[cfg(unix)] let fake = {
+            let f = root.join("claude.sh");
+            fs::write(&f, "#!/bin/sh\ncat > /dev/null\nprintf '### Mục tiêu\\nĐi Đà Lạt 4 ngày\\n'\n").unwrap();
+            use std::os::unix::fs::PermissionsExt; fs::set_permissions(&f, fs::Permissions::from_mode(0o755)).unwrap();
+            f
+        };
+        #[cfg(windows)] let fake = {
+            let f = root.join("claude.cmd");
+            fs::write(&f, "@echo off\r\nmore > nul\r\necho ### Muc tieu\r\necho Đi Đà Lạt 4 ngày\r\n").unwrap();
+            f
+        };
         std::env::set_var("CCGW_HANDOFF_CLAUDE", &fake);
         let skill_src = root.join("skillsrc/mine");
         fs::create_dir_all(&skill_src).unwrap();
@@ -594,14 +604,16 @@ mod tests {
         assert!(item.continued && item.pending && !item.new_project && item.target == "Travel");
 
         // 6. hand off: the note goes into the project's knowledge; a second handoff replaces it
-        let r = handoff_run(vec![item.session.clone()], false, "sonnet".into(), true).await.unwrap();
+        // Windows cannot hand a multi-line system prompt to a .cmd stand-in for claude.
+        let brief = cfg!(unix);
+        let r = handoff_run(vec![item.session.clone()], false, "sonnet".into(), brief).await.unwrap();
         assert!(r.errors.is_empty(), "{:?}", r.errors);
         assert_eq!(r.results.len(), 1);
-        assert!(r.results[0].brief && r.results[0].starter.starts_with("Đọc file \"Handoff - Plan trip"));
+        assert!(r.results[0].brief == brief && r.results[0].starter.starts_with("Đọc file \"Handoff - Plan trip"));
         let posted = calls.lock().unwrap().iter().filter(|c| c.0 == "POST" && c.1.contains("/projects/p1/docs")).count();
         assert_eq!(posted, 1);
         let body = calls.lock().unwrap().iter().rev().find(|c| c.0 == "POST" && c.1.contains("/docs")).unwrap().2.clone();
-        assert!(body.contains("Đi Đà Lạt 4 ngày") && body.contains("Thêm ngày 4") && !body.contains("Ngày 1: chợ đêm\\n\\n## You"));
+        assert!((!brief || body.contains("Đi Đà Lạt 4 ngày")) && body.contains("Thêm ngày 4") && !body.contains("Ngày 1: chợ đêm\\n\\n## You"));
         fs::OpenOptions::new().append(true).open(s.dir.join("audit.jsonl")).map(|mut f| { use std::io::Write; writeln!(f, "{{}}").unwrap(); }).unwrap();
         handoff_run(vec![item.session.clone()], false, "sonnet".into(), false).await.unwrap();
         assert!(calls.lock().unwrap().iter().any(|c| c.0 == "DELETE"));

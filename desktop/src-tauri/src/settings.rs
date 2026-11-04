@@ -85,6 +85,15 @@ pub fn apply_desktop_profile(config: &Config) -> Result<String, String> {
     apply_desktop_profile_at(&desktop_dir(), config)
 }
 
+/// The CCGW profile file if Desktop's library already lists it; never creates it.
+pub(crate) fn existing_profile_file() -> Option<PathBuf> {
+    let library = desktop_dir().join("configLibrary");
+    let meta = read_json(&library.join("_meta.json"));
+    let id = meta["entries"].as_array()?.iter().find(|e| e["name"] == "Claude Code (CCGW)")?["id"].as_str()?.to_string();
+    Some(library.join(format!("{id}.json")))
+}
+
+/// The CCGW profile file, registering it in Desktop's library first if needed (writes).
 pub(crate) fn profile_file() -> Result<PathBuf, String> {
     let library = desktop_dir().join("configLibrary");
     let meta_file = library.join("_meta.json");

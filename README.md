@@ -17,7 +17,7 @@ Chat, Cowork, tool calls and artifacts in Desktop all run through Claude Code, p
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-6E7781" />
 </p>
 
-<a href="#ccgw-desktop-app-macos">Desktop app</a> ·
+<a href="#ccgw-desktop-app-macos--windows">Desktop app</a> ·
 <a href="#features">Features</a> ·
 <a href="#getting-started">Getting started</a> ·
 <a href="#guide">Guide</a> ·
@@ -33,17 +33,19 @@ Chat, Cowork, tool calls and artifacts in Desktop all run through Claude Code, p
 
 ---
 
-## CCGW Desktop app (macOS)
+## CCGW Desktop app (macOS · Windows)
 
-Prefer a window to a terminal? **CCGW Desktop** is a native macOS app (Rust + Tauri) with the gateway built in. No Node.js needed: it only needs Claude Code installed and logged in (`claude`).
+Prefer a window to a terminal? **CCGW Desktop** is a native app (Rust + Tauri) with the gateway built in. No Node.js needed: it only needs Claude Code installed and logged in (`claude`).
 
 <p align="center">
-  <a href="https://github.com/haonguyenstech/ccgw/releases/download/desktop-v0.1.0/CCGW-Desktop-macos-arm64.zip"><b>⬇️ Download CCGW Desktop 0.1.0 for macOS (Apple Silicon)</b></a>
+  <a href="https://github.com/haonguyenstech/ccgw/releases/download/desktop-v0.2.0/CCGW-Desktop-macos-arm64.zip"><b>⬇️ macOS (Apple Silicon)</b></a> &nbsp;·&nbsp;
+  <a href="https://github.com/haonguyenstech/ccgw/releases/download/desktop-v0.2.0/CCGW-Desktop-windows-x64-setup.exe"><b>⬇️ Windows installer</b></a> &nbsp;·&nbsp;
+  <a href="https://github.com/haonguyenstech/ccgw/releases/download/desktop-v0.2.0/CCGW-Desktop-windows-x64-portable.zip">Windows portable</a>
 </p>
 
 <p align="center"><img src=".github/assets/desktop.png" width="760" alt="CCGW Desktop: gateway status, requests, tokens and plan usage" /></p>
 
-**Install**
+**Install on macOS**
 
 1. Unzip `CCGW-Desktop-macos-arm64.zip` and drag **CCGW Desktop.app** into **Applications**.
 2. The app is not notarized yet, so macOS blocks the first launch. Clear the download flag once:
@@ -52,6 +54,12 @@ Prefer a window to a terminal? **CCGW Desktop** is a native macOS app (Rust + Ta
    ```
    (or open it, then **System Settings → Privacy & Security → Open Anyway**).
 3. Open it. The gateway starts on `http://127.0.0.1:8799` with its own API key. The CLI uses `8787`, so both can run side by side.
+
+**Install on Windows (10/11, x64)**
+
+1. Run `CCGW-Desktop-windows-x64-setup.exe` (installs for your user, no admin; Start menu entry **CCGW Desktop**). Or unzip the portable build and run `CCGW Desktop.exe`.
+2. The app is not code-signed yet: if SmartScreen warns, click **More info → Run anyway**.
+3. Install Claude Code and sign in once in a terminal (`claude`). Works with Claude Desktop from the Microsoft Store or the installer.
 
 **What's inside**
 
@@ -64,7 +72,7 @@ Prefer a window to a terminal? **CCGW Desktop** is a native macOS app (Rust + Ta
 | Skills | Install a skill folder to the Gateway (`~/.claude/skills`) or upload it to your claude.ai account |
 | Settings | Host, port, Claude Code path, start on launch, rotate the key |
 
-The gateway bridges Desktop's tool calls, streams replies as they come and keeps one Claude Code process per conversation. Source: [`desktop/`](desktop/); build with `cd desktop/src-tauri && cargo tauri build`.
+The gateway bridges Desktop's tool calls, streams replies as they come and keeps one Claude Code process per conversation. Source: [`desktop/`](desktop/); build with `cd desktop/src-tauri && cargo tauri build` (Windows builds come from the `desktop` workflow).
 
 ---
 

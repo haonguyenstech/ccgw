@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::{fs, path::{Path, PathBuf}, process::Command};
+use std::{fs, path::{Path, PathBuf}};
 
 #[derive(Serialize)]
 pub struct SkillInfo { pub name: String, pub description: String, pub path: String }
@@ -35,9 +35,7 @@ fn frontmatter_description(content: &str) -> String {
 }
 
 pub fn choose_folder() -> Result<String, String> {
-    let output = Command::new("osascript").args(["-e", "POSIX path of (choose folder with prompt \"Chọn thư mục skill\")"]).output().map_err(|e| e.to_string())?;
-    if !output.status.success() { return Err("Đã hủy chọn thư mục.".into()); }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let path = crate::platform::choose_folder("Chọn thư mục skill")?.ok_or("Đã hủy chọn thư mục.")?;
     inspect(Path::new(&path))?;
     Ok(path)
 }
@@ -81,11 +79,11 @@ pub fn prepare_official(path: String) -> Result<String, String> {
     fs::create_dir_all(&export_dir).map_err(|e| e.to_string())?;
     let target = export_dir.join(format!("{}.zip", info.name));
     let temp = export_dir.join(format!("{}.{}.tmp.zip", info.name, std::process::id()));
-    let output = Command::new("ditto").args(["-c", "-k", "--keepParent", "--norsrc", "--noextattr"])
-        .arg(&source).arg(&temp).output().map_err(|e| e.to_string())?;
-    if !output.status.success() { return Err(format!("Không tạo được ZIP: {}", String::from_utf8_lossy(&output.stderr).trim())); }
+    let parent = source.parent().ok_or("Thư mục skill không hợp lệ")?;
+    let _ = fs::remove_file(&temp);
+    crate::platform::zip_dir(parent, &info.name, &temp)?;
     fs::rename(&temp, &target).map_err(|e| e.to_string())?;
-    let _ = Command::new("open").arg("-R").arg(&target).status();
+    crate::platform::reveal(&target);
     Ok(target.to_string_lossy().into_owned())
 }
 

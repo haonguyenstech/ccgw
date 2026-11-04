@@ -14,7 +14,8 @@ use chrono::{DateTime, SecondsFormat, Utc};
 use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
 use sha2::Sha256;
-use std::{collections::{HashMap, HashSet}, fs, path::{Path, PathBuf}, process::Command, sync::Mutex, time::Duration};
+use crate::platform;
+use std::{collections::{HashMap, HashSet}, fs, path::{Path, PathBuf}, sync::Mutex, time::Duration};
 
 pub const GATEWAY_ORG: &str = "00000000-0000-4000-8000-000000000001";
 const UPLOADS: &str = "local-desktop-app-uploads";
@@ -84,9 +85,17 @@ pub fn safe_name(s: &str) -> String {
 
 fn short(s: &str, n: usize) -> String { if s.chars().count() > n { format!("{}…", s.chars().take(n - 1).collect::<String>()) } else { s.to_string() } }
 
-// ---------------------------------------------------------------- Electron safeStorage (macOS)
+// ---------------------------------------------------------------- Electron safeStorage
+//
+// macOS: one "Claude Safe Storage" Keychain password for every Claude
+// instance, AES-128-CBC. Windows: each instance has its own AES-256-GCM key in
+// its "Local State", wrapped with DPAPI for the signed-in user. Tests set
+// CCGW_SAFE_STORAGE_PASSWORD and get the macOS scheme on any OS.
 
 static KEY: Mutex<Option<[u8; 16]>> = Mutex::new(None);
+static WIN_KEYS: Mutex<Vec<(PathBuf, [u8; 32])>> = Mutex::new(Vec::new());
+
+fn use_cbc() -> bool { !cfg!(windows) || std::env::var_os("CCGW_SAFE_STORAGE_PASSWORD").is_some() }
 
 /// AES key for "Claude Safe Storage": the Keychain password through PBKDF2, as Electron does.
 fn keychain_key() -> R<[u8; 16]> {
@@ -94,7 +103,7 @@ fn keychain_key() -> R<[u8; 16]> {
     let pw = match std::env::var("CCGW_SAFE_STORAGE_PASSWORD") {
         Ok(pw) => pw,
         Err(_) => {
-            let out = Command::new("/usr/bin/security").args(["find-generic-password", "-ws", "Claude Safe Storage"]).output().map_err(|e| e.to_string())?;
+            let out = platform::command("/usr/bin/security").args(["find-generic-password", "-ws", "Claude Safe Storage"]).output().map_err(|e| e.to_string())?;
             if !out.status.success() { return Err("Không đọc được mục Keychain \"Claude Safe Storage\". Khi macOS hỏi, bấm Allow (Cho phép) rồi thử lại.".into()); }
             String::from_utf8_lossy(&out.stdout).trim().to_string()
         }
@@ -105,18 +114,50 @@ fn keychain_key() -> R<[u8; 16]> {
     Ok(key)
 }
 
-const IV: [u8; 16] = [b' '; 16];
-
-pub fn decrypt(buf: &[u8]) -> R<Vec<u8>> {
-    if !(buf.starts_with(b"v10") || buf.starts_with(b"v11")) { return Ok(buf.to_vec()); }
-    let key = keychain_key()?;
-    cbc::Decryptor::<aes::Aes128>::new(&key.into(), &IV.into()).decrypt_padded_vec_mut::<Pkcs7>(&buf[3..]).map_err(|_| "Giải mã safeStorage thất bại".to_string())
+/// Windows: the instance's AES-256 key from `Local State`, unwrapped with DPAPI.
+fn local_state_key(dir: &Path) -> R<[u8; 32]> {
+    if let Some((_, k)) = WIN_KEYS.lock().unwrap().iter().find(|(d, _)| d == dir) { return Ok(*k); }
+    let state = read_json(&dir.join("Local State"), Value::Null);
+    let wrapped = state["os_crypt"]["encrypted_key"].as_str().ok_or_else(|| format!("Chưa có khoá mã hoá trong {}: mở Claude Desktop đó một lần.", dir.join("Local State").display()))?;
+    use base64::Engine;
+    let raw = base64::engine::general_purpose::STANDARD.decode(wrapped).map_err(|e| e.to_string())?;
+    let blob = base64::engine::general_purpose::STANDARD.encode(raw.get(5..).unwrap_or(&[])); // drop "DPAPI"
+    let out = platform::powershell(&format!("Add-Type -AssemblyName System.Security; [Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String('{blob}'), $null, 'CurrentUser'))"))
+        .map_err(|e| format!("DPAPI không mở được khoá của Claude Desktop ({e}). Chạy app trong phiên đăng nhập Windows của bạn."))?;
+    let key = base64::engine::general_purpose::STANDARD.decode(out.trim()).map_err(|e| e.to_string())?;
+    let key: [u8; 32] = key.try_into().map_err(|_| "Khoá Local State không đúng 32 byte".to_string())?;
+    WIN_KEYS.lock().unwrap().push((dir.to_path_buf(), key));
+    Ok(key)
 }
 
-pub fn encrypt(text: &[u8]) -> R<Vec<u8>> {
-    let key = keychain_key()?;
+const IV: [u8; 16] = [b' '; 16];
+
+/// Opens a safeStorage value sealed by the Desktop instance whose data dir is `dir`.
+pub fn decrypt(buf: &[u8], dir: &Path) -> R<Vec<u8>> {
+    if !(buf.starts_with(b"v10") || buf.starts_with(b"v11")) { return Ok(buf.to_vec()); }
+    if use_cbc() {
+        let key = keychain_key()?;
+        return cbc::Decryptor::<aes::Aes128>::new(&key.into(), &IV.into()).decrypt_padded_vec_mut::<Pkcs7>(&buf[3..]).map_err(|_| "Giải mã safeStorage thất bại".to_string());
+    }
+    use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+    if buf.len() < 3 + 12 + 16 { return Err("Dữ liệu safeStorage quá ngắn".into()); }
+    let key = local_state_key(dir)?;
+    Aes256Gcm::new(&key.into()).decrypt(Nonce::from_slice(&buf[3..15]), &buf[15..]).map_err(|_| "Giải mã safeStorage thất bại".to_string())
+}
+
+/// Seals a value the way the Desktop instance whose data dir is `dir` would.
+pub fn encrypt(text: &[u8], dir: &Path) -> R<Vec<u8>> {
     let mut out = b"v10".to_vec();
-    out.extend(cbc::Encryptor::<aes::Aes128>::new(&key.into(), &IV.into()).encrypt_padded_vec_mut::<Pkcs7>(text));
+    if use_cbc() {
+        let key = keychain_key()?;
+        out.extend(cbc::Encryptor::<aes::Aes128>::new(&key.into(), &IV.into()).encrypt_padded_vec_mut::<Pkcs7>(text));
+        return Ok(out);
+    }
+    use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
+    let key = local_state_key(dir)?;
+    let nonce: [u8; 12] = rand::random();
+    out.extend(&nonce);
+    out.extend(Aes256Gcm::new(&key.into()).encrypt(Nonce::from_slice(&nonce), text).map_err(|_| "Mã hoá safeStorage thất bại".to_string())?);
     Ok(out)
 }
 
@@ -129,35 +170,74 @@ fn cookie_text(plain: &[u8]) -> String {
 #[derive(Clone)]
 pub struct Jar { pub session_key: String, pub last_active_org: Option<String> }
 
-pub fn official_dir() -> PathBuf {
-    if let Ok(base) = std::env::var("CCGW_DESKTOP_DIR") { return PathBuf::from(base).join("official/Claude-Official"); }
-    dirs::home_dir().unwrap_or_default().join("Library/Application Support/Claude-Official")
-}
+pub fn official_dir() -> PathBuf { platform::official_dir() }
+
+/// Why reading the cookie file failed: Windows' official Desktop holds it exclusively while open.
+pub enum CookieError { Busy, Other(String) }
 
 /// The official Desktop's claude.ai cookies, read from a copy of its cookie database.
-pub fn official_cookies(official: &Path) -> R<Jar> {
+pub fn official_cookies(official: &Path) -> Result<Jar, CookieError> {
     let dir = [official.join("Network"), official.to_path_buf()].into_iter().find(|d| d.join("Cookies").exists())
-        .ok_or_else(|| "Cửa sổ Official chưa đăng nhập: chưa có file Cookies. Mở cửa sổ Official và đăng nhập claude.ai trước.".to_string())?;
-    let tmp = temp_dir("ccgw-cookies")?;
+        .ok_or_else(|| CookieError::Other("Cửa sổ Official chưa đăng nhập: chưa có file Cookies. Mở cửa sổ Official và đăng nhập claude.ai trước.".to_string()))?;
+    let tmp = temp_dir("ccgw-cookies").map_err(CookieError::Other)?;
     let result = (|| {
         for f in ["Cookies", "Cookies-journal", "Cookies-wal"] {
-            if dir.join(f).exists() { fs::copy(dir.join(f), tmp.join(f)).map_err(|e| e.to_string())?; }
+            if dir.join(f).exists() {
+                if let Err(e) = fs::copy(dir.join(f), tmp.join(f)) {
+                    // ERROR_SHARING_VIOLATION (32) / lock violation (33)
+                    return Err(if matches!(e.raw_os_error(), Some(32) | Some(33)) { CookieError::Busy } else { CookieError::Other(e.to_string()) });
+                }
+            }
         }
-        let sql = "select name, hex(encrypted_value) from cookies where host_key in ('.claude.ai','claude.ai') and name in ('sessionKey','lastActiveOrg')";
-        let out = Command::new("/usr/bin/sqlite3").arg("-readonly").arg(tmp.join("Cookies")).arg(sql).output().map_err(|e| format!("sqlite3: {e}"))?;
-        if !out.status.success() { return Err(format!("sqlite3: {}", String::from_utf8_lossy(&out.stderr).trim())); }
+        let db = rusqlite::Connection::open_with_flags(tmp.join("Cookies"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| CookieError::Other(format!("Cookies: {e}")))?;
+        let mut stmt = db.prepare("select name, encrypted_value from cookies where host_key in ('.claude.ai','claude.ai') and name in ('sessionKey','lastActiveOrg')").map_err(|e| CookieError::Other(e.to_string()))?;
+        let rows: Vec<(String, Vec<u8>)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| CookieError::Other(e.to_string()))?.filter_map(Result::ok).collect();
         let mut jar = HashMap::new();
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let Some((name, hexv)) = line.split_once('|') else { continue };
-            let raw = hex::decode(hexv.trim()).map_err(|e| e.to_string())?;
-            jar.insert(name.to_string(), cookie_text(&decrypt(&raw)?));
-        }
+        for (name, raw) in rows { jar.insert(name, cookie_text(&decrypt(&raw, official).map_err(CookieError::Other)?)); }
         let session_key = jar.remove("sessionKey").filter(|s| !s.is_empty())
-            .ok_or_else(|| "Cửa sổ Official chưa đăng nhập claude.ai (không có cookie sessionKey). Mở cửa sổ Official và đăng nhập.".to_string())?;
+            .ok_or_else(|| CookieError::Other("Cửa sổ Official chưa đăng nhập claude.ai (không có cookie sessionKey). Mở cửa sổ Official và đăng nhập.".to_string()))?;
         Ok(Jar { session_key, last_active_org: jar.remove("lastActiveOrg").filter(|s| !s.is_empty()) })
     })();
     let _ = fs::remove_dir_all(&tmp);
     result
+}
+
+fn session_cache() -> PathBuf { crate::settings::config_path().with_file_name("official-session.bin") }
+
+/// The official sign-in. On Windows the cookie file is locked while that
+/// Desktop runs: the last read is kept sealed with its own key, and when it no
+/// longer works the window closes for a moment and reopens.
+pub async fn official_jar() -> R<Jar> {
+    let dirs = platform::official_dir_candidates();
+    if platform::IS_WIN {
+        for d in &dirs {
+            if let Some(jar) = fs::read(session_cache()).ok().and_then(|b| decrypt(&b, d).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+                let jar = Jar { session_key: jar["sessionKey"].as_str().unwrap_or("").into(), last_active_org: jar["lastActiveOrg"].as_str().map(String::from) };
+                if !jar.session_key.is_empty() && ClaudeAi::new(&jar)?.projects().await.is_ok() { return Ok(jar); }
+            }
+        }
+    }
+    let mut last = String::from("Không tìm thấy dữ liệu của cửa sổ Official.");
+    for d in &dirs {
+        let jar = match official_cookies(d) {
+            Ok(j) => j,
+            Err(CookieError::Busy) => {
+                // Close the official window, read, reopen it (it stays signed in).
+                crate::native::quit_desktop(true)?;
+                let mut got = Err(CookieError::Busy);
+                for _ in 0..10 { got = official_cookies(d); if !matches!(got, Err(CookieError::Busy)) { break; } std::thread::sleep(Duration::from_millis(500)); }
+                let _ = crate::native::open_desktop(true);
+                match got { Ok(j) => j, Err(CookieError::Busy) => return Err("Cửa sổ Official đang khoá file đăng nhập; đóng nó rồi thử lại.".into()), Err(CookieError::Other(e)) => { last = e; continue } }
+            }
+            Err(CookieError::Other(e)) => { last = e; continue }
+        };
+        if platform::IS_WIN {
+            let body = json!({"sessionKey": jar.session_key, "lastActiveOrg": jar.last_active_org}).to_string();
+            if let Ok(sealed) = encrypt(body.as_bytes(), d) { let _ = write_private(&session_cache(), &sealed); }
+        }
+        return Ok(jar);
+    }
+    Err(last)
 }
 
 // ---------------------------------------------------------------- claude.ai, as the official Desktop
@@ -181,7 +261,7 @@ impl ClaudeAi {
     }
 
     /// Signs in with the official Desktop's cookie.
-    pub fn official() -> R<Self> { Self::new(&official_cookies(&official_dir())?) }
+    pub async fn official() -> R<Self> { Self::new(&official_jar().await?) }
 
     async fn org_id(&self) -> Result<String, ApiError> {
         let mut org = self.org.lock().await;
@@ -330,8 +410,7 @@ pub fn zip_skill(dir: &Path, name: &str) -> R<Vec<u8>> {
     let tmp = temp_dir("ccgw-skill")?;
     let result = (|| {
         copy_dir(dir, &tmp.join(name))?;
-        let out = Command::new("/usr/bin/zip").args(["-qr", "skill.zip", name]).current_dir(&tmp).output().map_err(|e| e.to_string())?;
-        if !out.status.success() { return Err(format!("zip: {}", String::from_utf8_lossy(&out.stderr).trim())); }
+        platform::zip_dir(&tmp, name, &tmp.join("skill.zip"))?;
         fs::read(tmp.join("skill.zip")).map_err(|e| e.to_string())
     })();
     let _ = fs::remove_dir_all(&tmp);
@@ -341,11 +420,9 @@ pub fn zip_skill(dir: &Path, name: &str) -> R<Vec<u8>> {
 pub fn unzip_skill(zip: &[u8], into: &Path) -> R<()> {
     let file = into.join(format!(".{}.zip", uuid::Uuid::new_v4()));
     fs::write(&file, zip).map_err(|e| e.to_string())?;
-    let out = Command::new("/usr/bin/unzip").arg("-qo").arg(&file).arg("-d").arg(into).output();
+    let r = platform::unzip(&file, into);
     let _ = fs::remove_file(&file);
-    let out = out.map_err(|e| e.to_string())?;
-    if !out.status.success() { return Err(format!("unzip: {}", String::from_utf8_lossy(&out.stderr).trim())); }
-    Ok(())
+    r
 }
 
 // ---------------------------------------------------------------- Cowork tasks from claude.ai
@@ -421,7 +498,7 @@ pub fn cowork_conversation(s: &Value, events: &[Value]) -> Value {
 
 // ---------------------------------------------------------------- the gateway Desktop's Cowork store
 
-pub struct Store { pub base: PathBuf, pub builtin: HashSet<String>, pub files_dir: PathBuf }
+pub struct Store { pub base: PathBuf, pub builtin: HashSet<String>, pub files_dir: PathBuf, pub desktop_dir: PathBuf }
 
 /// Sessions live under local-agent-mode-sessions/<account>/<org> (or the 8-character short form).
 pub fn gateway_store(desktop3p: &Path) -> R<Store> {
@@ -437,7 +514,7 @@ pub fn gateway_store(desktop3p: &Path) -> R<Store> {
     }
     let conf = read_json(&desktop3p.join("claude_desktop_config.json"), json!({}));
     let files_dir = conf["coworkUserFilesPath"].as_str().map(PathBuf::from).unwrap_or_else(|| dirs::home_dir().unwrap_or_default().join("Claude"));
-    Ok(Store { base, builtin, files_dir })
+    Ok(Store { base, builtin, files_dir, desktop_dir: desktop3p.to_path_buf() })
 }
 
 /// The branch claude.ai shows: from the current leaf back to the root.
@@ -514,7 +591,7 @@ pub fn write_session(store: &Store, conv: &Value, sid: Option<String>, space: Op
     // keyed by 32 random bytes kept base64 in safeStorage.
     let key: [u8; 32] = rand::random();
     use base64::Engine;
-    write_private(&dir.join(".audit-key"), &encrypt(base64::engine::general_purpose::STANDARD.encode(key).as_bytes())?)?;
+    write_private(&dir.join(".audit-key"), &encrypt(base64::engine::general_purpose::STANDARD.encode(key).as_bytes(), &store.desktop_dir)?)?;
     let mut prev = "audit-chain-genesis".to_string();
     let mut audit: Vec<String> = Vec::new();
     let mut sign = |rec: Value| {
@@ -956,9 +1033,9 @@ mod tests {
     #[test]
     fn safe_storage_round_trip_and_cookie_prefix() {
         with_env(|_| {
-            let sealed = encrypt(b"hello").unwrap();
+            let sealed = encrypt(b"hello", Path::new(".")).unwrap();
             assert!(sealed.starts_with(b"v10"));
-            assert_eq!(decrypt(&sealed).unwrap(), b"hello");
+            assert_eq!(decrypt(&sealed, Path::new(".")).unwrap(), b"hello");
             let mut prefixed = vec![0xffu8; 32];
             prefixed.extend(b"sk-ant-sid");
             assert_eq!(cookie_text(&prefixed), "sk-ant-sid");
@@ -1000,7 +1077,7 @@ mod tests {
             // The audit chain verifies with the key sealed next to it.
             let dir = st.base.join(&sid[..8]);
             use base64::Engine;
-            let key = base64::engine::general_purpose::STANDARD.decode(decrypt(&fs::read(dir.join(".audit-key")).unwrap()).unwrap()).unwrap();
+            let key = base64::engine::general_purpose::STANDARD.decode(decrypt(&fs::read(dir.join(".audit-key")).unwrap(), root).unwrap()).unwrap();
             let mut prev = "audit-chain-genesis".to_string();
             let lines: Vec<Value> = fs::read_to_string(dir.join("audit.jsonl")).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
             assert_eq!(lines.len(), 3);
