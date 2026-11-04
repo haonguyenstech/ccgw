@@ -49,3 +49,15 @@ Gateway hiện hỗ trợ chat văn bản. SSE được gửi khi Claude Code tr
   - syncflow (claude.ai giả bằng axum, cookie SQLite giả đã mã hoá, `claude` giả): plan → sync 3 mục + project + skill → sync lại không có gì mới → làm tiếp trong gateway → handoff về đúng project (ghi chú + transcript) → handoff lần hai xoá file cũ → read-sync upload `overwrite=true`.
 - Gateway headless với Claude Code thật (haiku): 2 tool call song song qua MCP `/mcp/<token>`, có `_meta.claudecode/toolUseId`; lượt đầu ~2–4 s, lượt có tool_result ~1 s, câu hỏi tiếp dùng lại phiên. Ngắt client giữa stream: phiên bị đóng, câu kế tiếp phát lại lịch sử đúng.
 - Chưa test với tài khoản thật: sync/handoff với claude.ai thật (cần bấm Allow Keychain; handoff ghi vào tài khoản), và Cowork thật trong cửa sổ Gateway qua bridge mới.
+
+### Windows — 2026-11-05 (Windows 10 22H2, Claude Desktop MSIX, real PC over SSH)
+
+- CI (`desktop` workflow, windows-latest): `cargo test` 21/21, NSIS installer + portable zip.
+- Headless gateway: health, model list, 401 without key; Claude Code there was signed out → HTTP 400 with the sign-in hint for plain and tool requests; no Claude Code children left.
+- `--action` on a fake Desktop dir: connector add (preset, Official via `node.exe …npx-cli.js -y mcp-remote@latest`, local command with backslash path), permissions, list, disable, remove, profile.
+- Real machine, read-only: `--selftest` finds `claude.exe`, `Claude-3p`, the MSIX Official dir; DPAPI unwraps the Local State key and decrypts the Official cookie (also over SSH); claude.ai API: 25 account skills, sync plan per project.
+- Real Official Desktop opened and closed through the app's code (8 s), told apart from the gateway one; `deploymentMode` stayed `3p`.
+- UI: all tabs rendered (PrintWindow screenshots, no clicks); Windows-only hints shown.
+- Installer: silent install to `%LOCALAPPDATA%\CCGW Desktop`, Start menu shortcut, app runs, silent uninstall leaves nothing.
+- Found and fixed: Windows paths lost backslashes in MCP commands; listing MCP registered a "Claude Code (CCGW)" entry in Desktop's `_meta.json` (now read-only; the stray entry on the test PC was removed).
+- Not tested: chat and tool bridge on Windows (Claude Code was signed out there), opening the gateway Desktop window on Windows.

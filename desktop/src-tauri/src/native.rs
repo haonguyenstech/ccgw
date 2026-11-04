@@ -111,7 +111,9 @@ fn connectors(shared: &Arc<Mutex<RuntimeState>>, official: bool) -> Result<Vec<V
         let conf = settings::read_json(&official_dir().join("claude_desktop_config.json"));
         return Ok(conf["mcpServers"].as_object().map(|o| o.iter().map(|(name, v)| { let mut entry=v.clone(); entry["name"]=json!(name); entry }).collect()).unwrap_or_default());
     }
-    let p = profile_file(shared)?;
+    let _ = shared;
+    // Reading must not register a profile in Desktop's library.
+    let Some(p) = settings::existing_profile_file() else { return Ok(vec![]) };
     Ok(settings::read_json(&p)["managedMcpServers"].as_array().cloned().unwrap_or_default())
 }
 fn save_connectors(shared: &Arc<Mutex<RuntimeState>>, official: bool, list: &[Value]) -> Result<(), String> {
@@ -343,6 +345,10 @@ pub async fn run(args: Vec<String>, shared: &Arc<Mutex<RuntimeState>>) -> Result
 mod tests {
     use super::*;
 
+    fn shared_for_listing() -> Arc<Mutex<RuntimeState>> {
+        Arc::new(Mutex::new(RuntimeState { config: settings::Config { host: "127.0.0.1".into(), port: 8799, api_key: "t".into(), claude_path: String::new(), autostart: true }, shutdown: None, running: false, last_error: None, generation: 0, activity: Default::default(), started_at: None }))
+    }
+
     #[tokio::test]
     async fn connector_actions_work_without_changing_desktop_mode() {
         let _env = settings::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -350,6 +356,9 @@ mod tests {
         std::env::set_var("CCGW_DESKTOP_DIR", &root);
         std::env::set_var("CCGW_RUST_HOME", &root);
         settings::set_desktop_mode("claude.ai").unwrap();
+        // Listing on a Desktop without a CCGW profile leaves its library alone.
+        assert!(list_mcp(&shared_for_listing()).unwrap().is_empty());
+        assert!(!root.join("configLibrary/_meta.json").exists());
         let shared = Arc::new(Mutex::new(RuntimeState {
             config: settings::Config { host: "127.0.0.1".into(), port: 8799, api_key: "test".into(), claude_path: String::new(), autostart: true },
             shutdown: None, running: false, last_error: None, generation: 0, activity: Default::default(), started_at: None,
