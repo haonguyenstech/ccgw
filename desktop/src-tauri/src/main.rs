@@ -47,6 +47,8 @@ struct Status {
     started_at: Option<u64>,
     last_error: Option<String>,
     version: &'static str,
+    os: &'static str,
+    official_dir: String,
     activity: gateway::ActivitySnapshot,
 }
 
@@ -76,6 +78,8 @@ async fn status(state: tauri::State<'_, AppState>) -> Result<Status, String> {
             started_at,
             last_error,
             version: env!("CARGO_PKG_VERSION"),
+            os: std::env::consts::OS,
+            official_dir: platform::official_dir().display().to_string(),
             activity,
         })
     }).await
@@ -313,7 +317,18 @@ fn main() {
         let config = settings::load().expect("config");
         let shared = Arc::new(Mutex::new(RuntimeState { config, shutdown: None, running: false, last_error: None, generation: 0, activity: Default::default(), started_at: None }));
         let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
-        let text = match rt.block_on(native::run(words, &shared)) { Ok(r) => format!("ok\n{}", r.output), Err(e) => format!("error\n{e}") };
+        // Read-only claude.ai checks for the sync code path.
+        let text = match words.first().map(String::as_str) {
+            Some("skills-official") => match rt.block_on(syncflow::official_skill_list()) {
+                Ok((list, notice)) => format!("ok\n{} skills: {}{}", list.len(), list.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", "), notice.map(|n| format!("\n{n}")).unwrap_or_default()),
+                Err(e) => format!("error\n{e}"),
+            },
+            Some("sync-plan") => match rt.block_on(syncflow::sync_plan()) {
+                Ok(p) => format!("ok\n{}\nskills: {} ({} new)", p.groups.iter().map(|g| format!("{}: {} chat, {} task, {} new", g.name, g.chats, g.tasks, g.fresh)).collect::<Vec<_>>().join("\n"), p.skills.len(), p.new_skills),
+                Err(e) => format!("error\n{e}"),
+            },
+            _ => match rt.block_on(native::run(words, &shared)) { Ok(r) => format!("ok\n{}", r.output), Err(e) => format!("error\n{e}") },
+        };
         let _ = std::fs::write(&out, text);
         return;
     }

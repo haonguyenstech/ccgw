@@ -59,7 +59,7 @@ const views = {
         `<dt>Model qua</dt><dd class="mono" id="win-gateway-url">…</dd><dt>Profile</dt><dd>Claude Code (CCGW)</dd><dt>Gateway</dt><dd id="win-gateway-gw">…</dd>`,
         'desktop open', 'desktop quit')}
       ${windowCard('official', 'user', 'Official', 'Dùng tài khoản claude.ai như bản Claude Desktop thông thường, trong một cửa sổ riêng.',
-        `<dt>Tài khoản</dt><dd>claude.ai</dd><dt>Dữ liệu</dt><dd class="mono">Claude-Official</dd><dt>Đăng nhập</dt><dd>Trong cửa sổ khi mở lần đầu</dd>`,
+        `<dt>Tài khoản</dt><dd>claude.ai</dd><dt>Dữ liệu</dt><dd class="mono" id="official-data-dir">…</dd><dt>Đăng nhập</dt><dd>Trong cửa sổ khi mở lần đầu</dd>`,
         'desktop official', 'desktop official quit')}
     </div>
     <p class="hint">Mở cửa sổ Gateway sẽ tự bật gateway và áp dụng profile. Đổi API key hoặc cổng thì cần mở lại cửa sổ Gateway.</p>`,
@@ -77,7 +77,7 @@ const views = {
     <div class="alert info" id="read-sync-banner" hidden></div>
     <article class="card">
       <div class="card-head"><div><h3>${icon('download')} Sync từ Official</h3><p>claude.ai → Gateway: chat, project và skill. <span id="sync-last"></span></p></div>${button('Tải danh sách', { id: 'sync-load', kind: 'ghost', icon: 'sync' })}</div>
-      <div id="sync-list" class="list"><p class="hint">Bấm Tải danh sách để đọc claude.ai qua phiên đăng nhập của cửa sổ Official. macOS có thể hỏi quyền Keychain “Claude Safe Storage”: bấm Allow.</p></div>
+      <div id="sync-list" class="list"><p class="hint">Bấm Tải danh sách để đọc claude.ai qua phiên đăng nhập của cửa sổ Official. <span class="mac-only">macOS có thể hỏi quyền Keychain “Claude Safe Storage”: bấm Allow.</span><span class="win-only">Nếu cửa sổ Official đang mở, app đóng nó vài giây để đọc phiên đăng nhập rồi mở lại.</span></p></div>
       <div class="button-row" id="sync-actions" hidden>${button('Sync mục đã chọn', { id: 'sync-run', icon: 'download' })}<span class="hint">Chat sang dạng văn bản; ảnh và PDF ở lại claude.ai. Cửa sổ Gateway đang mở sẽ được khởi động lại.</span></div>
       <div id="sync-result" class="note"></div>
     </article>
@@ -101,7 +101,7 @@ const views = {
     ${head('Skills', 'Thêm skill từ thư mục có file SKILL.md (có thể kèm scripts và tài nguyên) cho Gateway, Official hoặc cả hai.')}
     <div class="grid two">
       ${card('1. Chọn thư mục', '', `<div id="skill-preview" class="preview">Chưa chọn skill.</div><div class="button-row push">${button('Chọn thư mục', { id: 'skill-choose', kind: 'ghost', icon: 'folder' })}</div>`)}
-      ${card('2. Cài đặt', '<b>Gateway</b>: chép vào <code>~/.claude/skills</code>. <b>Official</b>: upload lên tài khoản claude.ai (macOS có thể hỏi Keychain, bấm Allow).', `<div id="skill-result" class="note"></div><div class="button-row push">${button('Cài cho Gateway', { id: 'skill-install', icon: 'download', attrs: 'disabled' })}${button('Cài cho Official', { id: 'skill-official', icon: 'upload', attrs: 'disabled' })}<button class="link" id="skill-export" disabled>Tạo ZIP</button></div>`)}
+      ${card('2. Cài đặt', '<b>Gateway</b>: chép vào <code>~/.claude/skills</code>. <b>Official</b>: upload lên tài khoản claude.ai<span class="mac-only"> (macOS có thể hỏi Keychain, bấm Allow)</span>.', `<div id="skill-result" class="note"></div><div class="button-row push">${button('Cài cho Gateway', { id: 'skill-install', icon: 'download', attrs: 'disabled' })}${button('Cài cho Official', { id: 'skill-official', icon: 'upload', attrs: 'disabled' })}<button class="link" id="skill-export" disabled>Tạo ZIP</button></div>`)}
     </div>
     <article class="card">
       <div class="card-head"><div><h3>Đã cài</h3><p id="skill-scope-hint">Skill trong <code>~/.claude/skills</code> mà Claude Code của gateway dùng được.</p></div>
@@ -339,6 +339,7 @@ function paintTable(id, list) {
 }
 function paint() {
   const s = status, a = s.activity;
+  if (document.body.dataset.os !== s.os) document.body.dataset.os = s.os;
   $('cli-dot').className = `dot ${s.claude_found ? 'on' : 'off'}`;
   setText('cli-status', s.claude_found ? `Claude Code ${s.claude_version?.split(' ')[0] || ''}` : 'Chưa thấy Claude Code');
   $('gw-dot').className = `dot ${s.running ? 'on' : s.last_error ? 'off' : ''}`;
@@ -359,7 +360,7 @@ function paint() {
     paintTable('recent-table', a.recent.slice(0, 6));
   }
   if (current === 'activity') paintTable('activity-table', a.recent);
-  if (current === 'desktop') { setText('win-gateway-url', s.url); setText('win-gateway-gw', s.running ? 'Đang chạy' : 'Đã dừng — sẽ tự bật khi mở'); }
+  if (current === 'desktop') { setText('official-data-dir', s.official_dir.split(/[\\/]/).slice(-3).join('/')); $('official-data-dir').title = s.official_dir; setText('win-gateway-url', s.url); setText('win-gateway-gw', s.running ? 'Đang chạy' : 'Đã dừng — sẽ tự bật khi mở'); }
   if (current === 'settings') {
     if (!settingsDirty) { $('set-host').value = s.host; $('set-port').value = s.port; $('set-claude').value = s.claude_path; $('set-claude').placeholder = s.claude_executable; $('set-autostart').checked = s.autostart; }
     setText('set-key', s.api_key); $('set-key').classList.toggle('masked', !keyVisible);

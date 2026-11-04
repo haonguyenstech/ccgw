@@ -73,6 +73,7 @@
 
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
+body:not([data-os="macos"]) .mac-only, body:not([data-os="windows"]) .win-only { display: none; }
 body { margin: 0; background: var(--bg); -webkit-font-smoothing: antialiased; }
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
