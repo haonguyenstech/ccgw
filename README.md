@@ -17,6 +17,7 @@ Chat, Cowork, tool calls and artifacts in Desktop all run through Claude Code, p
   <img alt="MIT" src="https://img.shields.io/badge/license-MIT-6E7781" />
 </p>
 
+<a href="#ccgw-desktop-app-macos">Desktop app</a> ·
 <a href="#features">Features</a> ·
 <a href="#getting-started">Getting started</a> ·
 <a href="#guide">Guide</a> ·
@@ -29,6 +30,41 @@ Chat, Cowork, tool calls and artifacts in Desktop all run through Claude Code, p
 <img src=".github/assets/demo.gif" width="680" alt="ccgw's interactive menu: status panel, connection info, connectors" />
 
 </div>
+
+---
+
+## CCGW Desktop app (macOS)
+
+Prefer a window to a terminal? **CCGW Desktop** is a native macOS app (Rust + Tauri) with the gateway built in. No Node.js needed: it only needs Claude Code installed and logged in (`claude`).
+
+<p align="center">
+  <a href="https://github.com/haonguyenstech/ccgw/releases/download/desktop-v0.1.0/CCGW-Desktop-macos-arm64.zip"><b>⬇️ Download CCGW Desktop 0.1.0 for macOS (Apple Silicon)</b></a>
+</p>
+
+<p align="center"><img src=".github/assets/desktop.png" width="760" alt="CCGW Desktop: gateway status, requests, tokens and plan usage" /></p>
+
+**Install**
+
+1. Unzip `CCGW-Desktop-macos-arm64.zip` and drag **CCGW Desktop.app** into **Applications**.
+2. The app is not notarized yet, so macOS blocks the first launch. Clear the download flag once:
+   ```sh
+   xattr -dr com.apple.quarantine "/Applications/CCGW Desktop.app"
+   ```
+   (or open it, then **System Settings → Privacy & Security → Open Anyway**).
+3. Open it. The gateway starts on `http://127.0.0.1:8799` with its own API key. The CLI uses `8787`, so both can run side by side.
+
+**What's inside**
+
+| Tab | |
+|---|---|
+| Overview · Activity | Start/stop the gateway, URL and key, every request with model, time and tokens, your Claude plan usage |
+| Claude Desktop | Open and close the Gateway and Official (claude.ai) windows, side by side |
+| Sync | Sync from claude.ai, hand off back to claude.ai, and add the **read-sync** skill |
+| MCP | Connectors for both windows: presets, any URL or command, enable/disable, "ask first" for Gateway |
+| Skills | Install a skill folder to the Gateway (`~/.claude/skills`) or upload it to your claude.ai account |
+| Settings | Host, port, Claude Code path, start on launch, rotate the key |
+
+The gateway bridges Desktop's tool calls, streams replies as they come and keeps one Claude Code process per conversation. Source: [`desktop/`](desktop/); build with `cd desktop/src-tauri && cargo tauri build`.
 
 ---
 
