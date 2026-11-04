@@ -7,6 +7,8 @@ on:
 
 jobs:
   unix:
+    # CLI releases only (vX.Y.Z); the desktop app is released as desktop-vX.Y.Z.
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     strategy:
       fail-fast: false
       matrix:
@@ -19,6 +21,7 @@ jobs:
       - run: curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | sh
       - run: ccgw --version && ccgw help
   windows:
+    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'v')
     runs-on: windows-latest
     steps:
       - uses: actions/setup-node@v5

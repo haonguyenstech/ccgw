@@ -5,7 +5,7 @@ description: Read the latest ccgw handoff note in this project's knowledge (what
 
 # Read the latest ccgw handoff
 
-`ccgw handoff` puts one knowledge file per chat into a claude.ai project, named
+`ccgw handoff` (or Hand off in the CCGW Desktop app) puts one knowledge file per chat into a claude.ai project, named
 `Handoff - <chat title> (<8-char id>).md`. Each starts with:
 
 ```
@@ -26,7 +26,7 @@ then `## Handoff note` (goal, done, decisions, state, still to do, next step),
      Older notes without that phrase: use the end of the `… – … UTC` range on
      the same line.
    - None found: say there is no ccgw handoff in this project's knowledge
-     (run `ccgw handoff` on the Mac first) and stop.
+     (run `ccgw handoff`, or Hand off in CCGW Desktop, on the Mac first) and stop.
 2. Read the whole file, not just the note: the conversation is the record and
    wins where the note disagrees.
 3. Reply with **only** a one-line confirmation, in the user's language
