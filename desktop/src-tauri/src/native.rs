@@ -147,7 +147,8 @@ pub(crate) fn split_command(line: &str) -> Result<Vec<String>, String> {
     for c in line.trim().chars() {
         if escape { word.push(c); escape = false; started = true; continue; }
         match (quote, c) {
-            (_, '\\') => { escape = true; started = true; }
+            // Windows paths use backslashes, so only Unix treats them as escapes.
+            (_, '\\') if !platform::IS_WIN => { escape = true; started = true; }
             (Some(q), c) if c == q => quote = None,
             (Some(_), c) => word.push(c),
             (None, '"' | '\'') => { quote = Some(c); started = true; }
@@ -370,6 +371,7 @@ mod tests {
         assert_eq!(endpoint(&json!({"command": "/opt/homebrew/bin/npx", "args": ["-y", "pkg"]})), "npx -y pkg");
         assert_eq!(split_command("node \"/a b/server.js\" --flag 'x y'").unwrap(), ["node", "/a b/server.js", "--flag", "x y"]);
         assert!(split_command("node 'oops").is_err());
+        if platform::IS_WIN { assert_eq!(split_command(r"C:\Tools\mcp.exe --dir C:\data").unwrap(), [r"C:\Tools\mcp.exe", "--dir", r"C:\data"]); }
         // Official: a preset goes through mcp-remote, a command stays local; no toolPolicy there.
         if platform::resolve_program("npx").is_some() {
             connector_action(&["connector".into(), "add".into(), "linear".into(), "--official".into()], &shared).await.unwrap();
